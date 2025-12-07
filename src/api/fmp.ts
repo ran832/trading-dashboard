@@ -23,6 +23,13 @@ export interface FloatData {
   avgVolume: number;
 }
 
+export interface EarningsEvent {
+  symbol: string;
+  date: string;
+  time: 'bmo' | 'amc' | null;
+  fiscalQuarter: string;
+}
+
 // ============ CACHE ============
 const CACHE_KEY = 'dtd_fmp_cache';
 const CACHE_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
@@ -212,5 +219,54 @@ export const getCacheStats = (): { total: number; valid: number } => {
     total: Object.keys(cache).length,
     valid,
   };
+};
+
+/**
+ * Fetch upcoming earnings for a symbol
+ * Returns earnings within next 7 days
+ */
+export const fetchEarnings = async (symbol: string): Promise<EarningsEvent | null> => {
+  if (!FMP_KEY) {
+    console.warn('FMP API key not configured');
+    return null;
+  }
+
+  try {
+    // Get earnings calendar for next 7 days
+    const today = new Date();
+    const endDate = new Date(today);
+    endDate.setDate(endDate.getDate() + 7);
+
+    const fromDate = today.toISOString().split('T')[0];
+    const toDate = endDate.toISOString().split('T')[0];
+
+    const response = await fetch(
+      `${FMP_URL}/earning_calendar?from=${fromDate}&to=${toDate}&apikey=${FMP_KEY}`
+    );
+
+    if (!response.ok) {
+      console.warn(`FMP earnings API error: ${response.status}`);
+      return null;
+    }
+
+    const data = await response.json();
+
+    // Find matching symbol
+    const earnings = data.find((e: any) => e.symbol === symbol);
+
+    if (earnings) {
+      return {
+        symbol: earnings.symbol,
+        date: earnings.date,
+        time: earnings.time?.toLowerCase() === 'bmo' ? 'bmo' : earnings.time?.toLowerCase() === 'amc' ? 'amc' : null,
+        fiscalQuarter: earnings.fiscalDateEnding || '',
+      };
+    }
+
+    return null;
+  } catch (error) {
+    console.warn(`Failed to fetch earnings for ${symbol}:`, error);
+    return null;
+  }
 };
 

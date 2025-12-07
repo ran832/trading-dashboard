@@ -12,6 +12,7 @@ import {
   SearchResult,
   PolygonUpgradeError
 } from './api/polygon';
+import { fetchEarnings, EarningsEvent } from './api/fmp';
 import StockSearch from './components/StockSearch';
 
 // Debug API keys
@@ -288,7 +289,11 @@ function App() {
   
   // Search-loaded stocks (from direct API calls)
   const [searchedStocks, setSearchedStocks] = useState<Map<string, Stock>>(new Map());
-  
+
+  // Earnings data
+  const [earnings, setEarnings] = useState<EarningsEvent | null>(null);
+  const [loadingEarnings, setLoadingEarnings] = useState(false);
+
   const prevStocksRef = useRef<Record<ScannerTab, Stock[]> | null>(null);
   const isFirstRender = useRef(true);
   const journalTimeoutRef = useRef<number>();
@@ -469,6 +474,19 @@ function App() {
   useEffect(() => {
     if (selectedIndex >= 0 && filteredStocks[selectedIndex]) setSelected(filteredStocks[selectedIndex]);
   }, [selectedIndex, filteredStocks]);
+
+  // Fetch earnings when stock is selected
+  useEffect(() => {
+    if (selected) {
+      setLoadingEarnings(true);
+      fetchEarnings(selected.symbol)
+        .then(data => setEarnings(data))
+        .catch(() => setEarnings(null))
+        .finally(() => setLoadingEarnings(false));
+    } else {
+      setEarnings(null);
+    }
+  }, [selected]);
 
   // Watchlist
   const addToWatchlist = useCallback((symbol: string) => {
@@ -732,8 +750,41 @@ function App() {
                     <span className="text-xl font-bold text-[#e2e8f0]">${selected.price.toFixed(2)}</span>
                     <span className={`text-sm font-medium ${selected.changePercent >= 0 ? 'text-[#10b981]' : 'text-[#ef4444]'}`}>{formatPct(selected.changePercent)}</span>
                   </div>
-                  
+
                   {selected.sector && <div className="text-[10px] text-[#64748b] mb-3">{selected.sector} • {selected.exchange}</div>}
+
+                  {/* NEWS LINKS */}
+                  <div className="flex gap-2 mb-3">
+                    <a href={`https://news.google.com/search?q=${selected.symbol}`} target="_blank" rel="noopener noreferrer" className="px-2 py-1 bg-[#1e293b] hover:bg-[#334155] text-[#94a3b8] hover:text-[#e2e8f0] text-[10px] rounded transition-colors">📰 News</a>
+                    <a href={`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${selected.symbol}&type=&dateb=&owner=exclude&count=40`} target="_blank" rel="noopener noreferrer" className="px-2 py-1 bg-[#1e293b] hover:bg-[#334155] text-[#94a3b8] hover:text-[#e2e8f0] text-[10px] rounded transition-colors">📋 SEC</a>
+                    <a href={`https://twitter.com/search?q=%24${selected.symbol}`} target="_blank" rel="noopener noreferrer" className="px-2 py-1 bg-[#1e293b] hover:bg-[#334155] text-[#94a3b8] hover:text-[#e2e8f0] text-[10px] rounded transition-colors">𝕏 Twitter</a>
+                    <a href={`https://stocktwits.com/symbol/${selected.symbol}`} target="_blank" rel="noopener noreferrer" className="px-2 py-1 bg-[#1e293b] hover:bg-[#334155] text-[#94a3b8] hover:text-[#e2e8f0] text-[10px] rounded transition-colors">💬 ST</a>
+                  </div>
+
+                  {/* EARNINGS WARNING */}
+                  {earnings && (() => {
+                    const today = new Date();
+                    today.setHours(0, 0, 0, 0);
+                    const earningsDate = new Date(earnings.date);
+                    earningsDate.setHours(0, 0, 0, 0);
+                    const daysUntil = Math.floor((earningsDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+                    const isUrgent = daysUntil <= 1;
+                    const dateStr = earningsDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                    const timeStr = earnings.time ? (earnings.time === 'bmo' ? 'BMO' : 'AMC') : '';
+
+                    return (
+                      <div className={`px-2 py-1 rounded text-[10px] font-medium mb-3 ${isUrgent ? 'bg-[#ef4444]/20 text-[#ef4444]' : 'bg-[#f59e0b]/20 text-[#f59e0b]'}`}>
+                        ⚠️ ER: {dateStr} {timeStr}
+                      </div>
+                    );
+                  })()}
+
+                  {/* CATALYST INDICATOR */}
+                  {selected.gapPercent > 10 && (
+                    <div className="px-2 py-1 rounded text-[10px] font-medium mb-3 bg-[#06b6d4]/20 text-[#06b6d4]">
+                      🔍 Check news - high gap detected
+                    </div>
+                  )}
                   
                   <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-[11px] mb-4">
                     <div className="flex justify-between"><span className="text-[#64748b]">Float</span><span className={selected.float > 0 && selected.float < 20000000 ? 'text-[#06b6d4] font-medium' : ''}>{selected.float > 0 ? formatNum(selected.float) : 'N/A'}</span></div>

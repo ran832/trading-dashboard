@@ -290,8 +290,8 @@ const ShortcutsModal = ({ onClose }: { onClose: () => void }) => (
 );
 
 // ============ CONTEXT MENU ============
-const ContextMenu = ({ x, y, stock, onClose, onAddWatchlist, onOpenTV, onCopy }: {
-  x: number; y: number; stock: Stock; onClose: () => void;
+const ContextMenu = ({ x, y, onClose, onAddWatchlist, onOpenTV, onCopy }: {
+  x: number; y: number; onClose: () => void;
   onAddWatchlist: () => void; onOpenTV: () => void; onCopy: () => void;
 }) => (
   <div className="fixed bg-[#1e293b] border border-[#374151] rounded shadow-lg py-1 z-50 text-[11px]" style={{ left: x, top: y }}>
@@ -336,7 +336,7 @@ function App() {
   const [activeTab, setActiveTab] = useState<ScannerTab>('gappers');
   const [stocks, setStocks] = useState<Record<ScannerTab, Stock[]>>(() => generateMockData());
   const [apiStatus, setApiStatus] = useState<ApiStatus>('offline');
-  const [lastUpdate, setLastUpdate] = useState<string>('');
+  const [lastUpdate, setLastUpdate] = useState<string>(formatTime());
   const [isLoading, setIsLoading] = useState(false);
   const [selected, setSelected] = useState<Stock | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number>(-1);
@@ -484,13 +484,13 @@ function App() {
           return 0;
       }
       
-      if (typeof aVal === 'string') {
+      if (typeof aVal === 'string' || typeof bVal === 'string') {
         return sortState.direction === 'desc' 
-          ? bVal.toString().localeCompare(aVal.toString())
-          : aVal.toString().localeCompare(bVal.toString());
+          ? String(bVal).localeCompare(String(aVal))
+          : String(aVal).localeCompare(String(bVal));
       }
       
-      return sortState.direction === 'desc' ? bVal - aVal : aVal - bVal;
+      return sortState.direction === 'desc' ? Number(bVal) - Number(aVal) : Number(aVal) - Number(bVal);
     });
     
     return sorted;
@@ -812,6 +812,7 @@ function App() {
           Sort: <span className="text-[#06b6d4]">{sortState.column}</span>
           {sortState.direction && <span className="text-[#64748b]"> {sortState.direction === 'desc' ? '▼' : '▲'}</span>}
         </span>
+        <span className="text-[#64748b]">Updated: <span className="text-[#e2e8f0]">{lastUpdate}</span></span>
         <span className="ml-auto text-[#64748b]">⏱ <span className="text-[#e2e8f0] font-mono">{currentTime}</span></span>
       </div>
 
@@ -1029,7 +1030,7 @@ function App() {
       </main>
 
       {showShortcuts && <ShortcutsModal onClose={() => setShowShortcuts(false)} />}
-      {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} stock={contextMenu.stock} onClose={() => setContextMenu(null)} onAddWatchlist={() => addToWatchlist(contextMenu.stock.symbol)} onOpenTV={() => openTradingView(contextMenu.stock.symbol)} onCopy={() => copySymbol(contextMenu.stock.symbol)} />}
+      {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} onClose={() => setContextMenu(null)} onAddWatchlist={() => addToWatchlist(contextMenu.stock.symbol)} onOpenTV={() => openTradingView(contextMenu.stock.symbol)} onCopy={() => copySymbol(contextMenu.stock.symbol)} />}
     </div>
   );
 }

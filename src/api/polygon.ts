@@ -5,6 +5,14 @@ import { fetchProfilesBatch, FloatData } from './fmp';
 const POLYGON_KEY = import.meta.env.VITE_POLYGON_API_KEY;
 const POLYGON_URL = 'https://api.polygon.io';
 
+// ============ ERRORS ============
+export class PolygonUpgradeError extends Error {
+  constructor(message: string = 'Polygon API requires plan upgrade (403)') {
+    super(message);
+    this.name = 'PolygonUpgradeError';
+  }
+}
+
 // ============ TYPES ============
 export interface PolygonTicker {
   ticker: string;
@@ -139,8 +147,17 @@ const getStrategy = (stock: Partial<ProcessedStock>): string[] => {
 };
 
 // ============ POLYGON API ============
+let logged403 = false;
+
 export const fetchGainers = async (): Promise<PolygonTicker[]> => {
   const response = await fetch(`${POLYGON_URL}/v2/snapshot/locale/us/markets/stocks/gainers?apiKey=${POLYGON_KEY}`);
+  if (response.status === 403) {
+    if (!logged403) {
+      console.warn('⚠️ Polygon API 403: Plan upgrade required for gainers/losers endpoints');
+      logged403 = true;
+    }
+    throw new PolygonUpgradeError();
+  }
   if (!response.ok) throw new Error(`API Error: ${response.status}`);
   const data = await response.json();
   return data.tickers || [];
@@ -148,6 +165,13 @@ export const fetchGainers = async (): Promise<PolygonTicker[]> => {
 
 export const fetchLosers = async (): Promise<PolygonTicker[]> => {
   const response = await fetch(`${POLYGON_URL}/v2/snapshot/locale/us/markets/stocks/losers?apiKey=${POLYGON_KEY}`);
+  if (response.status === 403) {
+    if (!logged403) {
+      console.warn('⚠️ Polygon API 403: Plan upgrade required for gainers/losers endpoints');
+      logged403 = true;
+    }
+    throw new PolygonUpgradeError();
+  }
   if (!response.ok) throw new Error(`API Error: ${response.status}`);
   const data = await response.json();
   return data.tickers || [];
@@ -280,4 +304,94 @@ export const matchesCriteria = (stock: ProcessedStock): boolean => {
     stock.rVol >= 5 &&
     (stock.float === 0 || stock.float < 20000000) // Pass if no float data OR float < 20M
   );
+};
+
+// ============ SEARCH TYPES ============
+export interface SearchResult {
+  ticker: string;
+  name: string;
+  market: string;
+  locale: string;
+  primary_exchange: string;
+  type: string;
+  active: boolean;
+  currency_name: string;
+}
+
+// ============ SEARCH AUTOCOMPLETE ============
+export const searchTickers = async (query: string): Promise<SearchResult[]> => {
+  if (!query || query.length < 1) return [];
+  
+  // Debug logging
+  console.log('🔍 Searching for:', query);
+  console.log('🔑 API Key present:', !!POLYGON_KEY);
+  console.log('🌐 Full URL:', `${POLYGON_URL}/v3/reference/tickers?search=${query}&active=true&limit=10&apiKey=${POLYGON_KEY ? 'PRESENT' : 'MISSING'}`);
+  
+  try {
+    const response = await fetch(
+      `${POLYGON_URL}/v3/reference/tickers?search=${encodeURIComponent(query)}&active=true&limit=10&apiKey=${POLYGON_KEY}`
+    );
+    
+    // Debug logging
+    console.log('📡 Search response status:', response.status);
+    
+    if (!response.ok) throw new Error(`Search API Error: ${response.status}`);
+    const data = await response.json();
+    
+    // Debug logging
+    console.log('📊 Search results:', data);
+    
+    return data.results || [];
+  } catch (error) {
+    console.error('❌ Search error:', error);
+    return [];
+  }
+};
+
+// ============ FETCH SINGLE TICKER SNAPSHOT ============
+export const fetchTickerSnapshot = async (symbol: string): Promise<ProcessedStock | null> => {
+  // Debug logging
+  console.log('📈 Fetching snapshot for:', symbol);
+  console.log('🔑 API Key present:', !!POLYGON_KEY);
+  
+  try {
+    const response = await fetch(
+      `${POLYGON_URL}/v2/snapshot/locale/us/markets/stocks/tickers/${symbol.toUpperCase()}?apiKey=${POLYGON_KEY}`
+    );
+    
+    // Debug logging
+    console.log('📡 Snapshot response status:', response.status);
+    
+    if (!response.ok) {
+      if (response.status === 404) {
+        console.log('⚠️ Symbol not found (404)');
+        return null;
+      }
+      throw new Error(`API Error: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    
+    // Debug logging
+    console.log('📊 Snapshot data:', data);
+    
+    const ticker = data.ticker as PolygonTicker;
+    
+    if (!ticker) {
+      console.log('⚠️ No ticker in response');
+      return null;
+    }
+    
+    // Get float data from FMP
+    const floatMap = await fetchProfilesBatch([ticker.ticker], 1);
+    const floatData = floatMap.get(ticker.ticker);
+    
+    const processed = processPolygonTicker(ticker, undefined, floatData);
+    console.log('✅ Processed stock:', processed);
+    
+    return processed;
+  } catch (error) {
+    console.error('❌ Fetch ticker error:', error);
+    return null;
+  }
 };

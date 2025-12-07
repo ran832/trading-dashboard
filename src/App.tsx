@@ -1,15 +1,20 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { 
-  fetchScannerData, 
-  ProcessedStock, 
-  ApiStatus, 
+import {
+  fetchScannerData,
+  ProcessedStock,
+  ApiStatus,
   matchesCriteria,
   isPreMarket,
   isMarketJustOpened,
-  formatTime 
+  formatTime,
+  searchTickers,
+  fetchTickerSnapshot,
+  SearchResult,
+  PolygonUpgradeError
 } from './api/polygon';
+import StockSearch from './components/StockSearch';
 
-// Debug API keys on load
+// Debug API keys
 console.log('🔑 Polygon API Key:', import.meta.env.VITE_POLYGON_API_KEY ? '✓ Present' : '✗ Missing');
 console.log('🔑 FMP API Key:', import.meta.env.VITE_FMP_API_KEY ? '✓ Present' : '✗ Missing');
 
@@ -17,11 +22,11 @@ console.log('🔑 FMP API Key:', import.meta.env.VITE_FMP_API_KEY ? '✓ Present
 interface Stock extends ProcessedStock {}
 
 interface WatchlistItem {
+  id: string;
   symbol: string;
   note: string;
-  addedPrice: number;
   color: 'red' | 'yellow' | 'green' | 'none';
-  priceHistory: number[];
+  addedAt: number;
 }
 
 interface AlertItem {
@@ -35,14 +40,12 @@ interface AlertItem {
 
 interface AlertSettings {
   soundEnabled: boolean;
-  flashEnabled: boolean;
   volume: number;
   changeThreshold: number;
   rvolThreshold: number;
 }
 
 type ScannerTab = 'gappers' | 'momentum' | 'highRvol';
-type ChartInterval = '1' | '5' | '15' | 'D';
 type SortColumn = 'time' | 'symbol' | 'price' | 'volume' | 'float' | 'rVol' | 'gapPercent' | 'changePercent' | 'vwapDistance';
 type SortDirection = 'asc' | 'desc' | null;
 
@@ -51,7 +54,7 @@ interface SortState {
   direction: SortDirection;
 }
 
-// ============ MOCK DATA FALLBACK ============
+// ============ MOCK DATA ============
 const MOCK_SYMBOLS = ['NVDA', 'TSLA', 'AMD', 'META', 'AAPL', 'GOOGL', 'AMZN', 'MSFT', 'PLTR', 'SOFI', 'NIO', 'COIN', 'MARA', 'RIOT', 'GME', 'AMC', 'MULN', 'FFIE', 'GOEV', 'WKHS'];
 
 const rand = (min: number, max: number) => Math.random() * (max - min) + min;
@@ -67,31 +70,15 @@ const generateMockStock = (symbol: string): Stock => {
   const vwapDistance = ((price - vwap) / vwap) * 100;
   
   return {
-    symbol,
-    companyName: symbol,
-    exchange: 'NASDAQ',
-    price,
-    prevPrice: price,
-    dayHigh: price * 1.05,
-    dayLow: price * 0.92,
-    dayOpen: price * (1 - gapPercent / 100),
-    volume,
-    float: randInt(2000000, 100000000),
-    marketCap: randInt(50000000, 10000000000),
-    sector: '',
-    rVol,
-    prevRVol: rVol,
-    gapPercent,
-    changePercent,
-    prevChangePercent: changePercent,
-    vwap,
-    vwapDistance: Math.round(vwapDistance * 100) / 100,
-    high52w: price * 2,
-    low52w: price * 0.3,
-    time: formatTime(),
+    symbol, companyName: symbol, exchange: 'NASDAQ', price, prevPrice: price,
+    dayHigh: price * 1.05, dayLow: price * 0.92, dayOpen: price * (1 - gapPercent / 100),
+    volume, float: randInt(2000000, 100000000), marketCap: randInt(50000000, 10000000000),
+    sector: ['Technology', 'Healthcare', 'Finance', 'Energy'][randInt(0, 4)],
+    rVol, prevRVol: rVol, gapPercent, changePercent, prevChangePercent: changePercent,
+    vwap, vwapDistance: Math.round(vwapDistance * 100) / 100,
+    high52w: price * 2, low52w: price * 0.3, time: formatTime(),
     strategy: gapPercent > 10 ? ['Gap & Go'] : ['Momentum'],
-    prevDayClose: price * (1 - changePercent / 100),
-    prevDayVolume: volume * 0.7,
+    prevDayClose: price * (1 - changePercent / 100), prevDayVolume: volume * 0.7,
     priceHistory: Array(10).fill(0).map(() => price + rand(-1, 1)),
   };
 };
@@ -105,7 +92,7 @@ const generateMockData = () => {
   };
 };
 
-// ============ AUDIO SYSTEM ============
+// ============ AUDIO ============
 const playAlert = (type: 'newMover' | 'breakout' | 'volumeSpike', volume: number = 0.3) => {
   try {
     const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -113,43 +100,21 @@ const playAlert = (type: 'newMover' | 'breakout' | 'volumeSpike', volume: number
     const gain = ctx.createGain();
     osc.connect(gain);
     gain.connect(ctx.destination);
-    
-    if (type === 'newMover') osc.frequency.value = 880;
-    else if (type === 'breakout') osc.frequency.value = 1100;
-    else osc.frequency.value = 660;
-    
+    osc.frequency.value = type === 'newMover' ? 880 : type === 'breakout' ? 1100 : 660;
     osc.type = 'sine';
     gain.gain.setValueAtTime(volume, ctx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
     osc.start();
     osc.stop(ctx.currentTime + 0.15);
-    
-    if (type === 'breakout') {
-      setTimeout(() => {
-        const osc2 = ctx.createOscillator();
-        const gain2 = ctx.createGain();
-        osc2.connect(gain2);
-        gain2.connect(ctx.destination);
-        osc2.frequency.value = 1320;
-        osc2.type = 'sine';
-        gain2.gain.setValueAtTime(volume, ctx.currentTime);
-        gain2.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
-        osc2.start();
-        osc2.stop(ctx.currentTime + 0.1);
-      }, 120);
-    }
-  } catch (e) {
-    console.log('Audio not supported');
-  }
+  } catch (e) { console.log('Audio not supported'); }
 };
 
-// ============ HEATMAP COLORS ============
+// ============ COLORS ============
 const getVolumeColor = (vol: number): string => {
   if (vol >= 50000000) return 'rgba(6, 182, 212, 0.7)';
   if (vol >= 20000000) return 'rgba(6, 182, 212, 0.5)';
   if (vol >= 5000000) return 'rgba(6, 182, 212, 0.3)';
-  if (vol >= 1000000) return 'rgba(6, 182, 212, 0.15)';
-  return 'rgba(6, 182, 212, 0.05)';
+  return 'rgba(6, 182, 212, 0.1)';
 };
 
 const getFloatColor = (float: number): string => {
@@ -157,7 +122,6 @@ const getFloatColor = (float: number): string => {
   if (float < 5000000) return 'rgba(6, 182, 212, 0.8)';
   if (float < 10000000) return 'rgba(6, 182, 212, 0.6)';
   if (float < 20000000) return 'rgba(6, 182, 212, 0.4)';
-  if (float < 50000000) return 'rgba(6, 182, 212, 0.2)';
   return 'rgba(6, 182, 212, 0.1)';
 };
 
@@ -174,8 +138,7 @@ const getPercentColor = (pct: number): string => {
   if (pct >= 5) return 'rgba(16, 185, 129, 0.3)';
   if (pct >= 0) return 'rgba(16, 185, 129, 0.15)';
   if (pct >= -5) return 'rgba(239, 68, 68, 0.15)';
-  if (pct >= -10) return 'rgba(239, 68, 68, 0.3)';
-  return 'rgba(239, 68, 68, 0.5)';
+  return 'rgba(239, 68, 68, 0.3)';
 };
 
 const getVwapColor = (dist: number): { bg: string; text: string } => {
@@ -193,146 +156,91 @@ const formatNum = (n: number): string => {
   return n.toFixed(0);
 };
 
-const formatPct = (n: number): string => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+const formatPct = (n: number): string => `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
+
+const getTodayDate = () => new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+const getTimestamp = () => new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 
 // ============ STORAGE ============
 const STORAGE = { 
-  WATCHLIST: 'dtd_watchlist', 
-  NOTES: 'dtd_notes', 
-  ACCOUNT: 'dtd_account',
-  ALERT_SETTINGS: 'dtd_alert_settings',
+  WATCHLIST: 'dtd_watchlist_v2', 
+  JOURNAL: 'dtd_journal',
+  JOURNAL_SECTIONS: 'dtd_journal_sections',
   MY_SETUPS: 'dtd_my_setups',
   SOUND_ENABLED: 'dtd_sound_enabled',
   SCANNER_SORT: 'dtd_scanner_sort',
 };
 
-const DEFAULT_ALERT_SETTINGS: AlertSettings = {
-  soundEnabled: true,
-  flashEnabled: true,
-  volume: 0.3,
-  changeThreshold: 3,
-  rvolThreshold: 10,
-};
-
 const DEFAULT_SORT: SortState = { column: 'gapPercent', direction: 'desc' };
 
-// ============ MINI SPARKLINE ============
-const Sparkline = ({ data, width = 60, height = 20 }: { data: number[]; width?: number; height?: number }) => {
-  if (data.length < 2) return null;
-  const min = Math.min(...data);
-  const max = Math.max(...data);
-  const range = max - min || 1;
-  const points = data.map((v, i) => {
-    const x = (i / (data.length - 1)) * width;
-    const y = height - ((v - min) / range) * height;
-    return `${x},${y}`;
-  }).join(' ');
-  const isUp = data[data.length - 1] >= data[0];
-  
-  return (
-    <svg width={width} height={height} className="inline-block">
-      <polyline points={points} fill="none" stroke={isUp ? '#10b981' : '#ef4444'} strokeWidth="1.5" />
-    </svg>
-  );
-};
-
-// ============ PANEL WRAPPER ============
-const Panel = ({ title, children, className = '', headerRight, preMarket }: { 
-  title: string; 
-  children: React.ReactNode; 
-  className?: string; 
-  headerRight?: React.ReactNode;
-  preMarket?: boolean;
+// ============ PANEL ============
+const Panel = ({ title, children, className = '', headerRight }: { 
+  title: string; children: React.ReactNode; className?: string; headerRight?: React.ReactNode;
 }) => (
-  <div className={`bg-[#111827] border border-[#1e293b] rounded flex flex-col panel-enter ${className}`}>
-    <div className={`h-7 border-b border-[#1e293b] px-2 flex items-center justify-between shrink-0 ${
-      preMarket ? 'bg-gradient-to-r from-[#1e1b4b] to-[#312e81]' : 'bg-gradient-to-r from-[#0f1419] to-[#1a2332]'
-    }`}>
-      <div className="flex items-center gap-2">
-        <span className="text-[10px] text-[#64748b] cursor-move">⋮⋮</span>
-        <span className={`text-[11px] font-semibold uppercase tracking-wide ${preMarket ? 'text-[#8b5cf6]' : 'text-[#06b6d4]'}`}>{title}</span>
-      </div>
-      <div className="flex items-center gap-2">
-        {headerRight}
-        <span className="text-[#64748b] text-[10px] hover:text-[#ef4444] cursor-pointer">✕</span>
-      </div>
+  <div className={`bg-[#111827] border border-[#1e293b] rounded flex flex-col ${className}`}>
+    <div className="h-8 bg-gradient-to-r from-[#0f1419] to-[#1a2332] border-b border-[#1e293b] px-3 flex items-center justify-between shrink-0">
+      <span className="text-[12px] text-[#06b6d4] font-semibold uppercase tracking-wide">{title}</span>
+      {headerRight}
     </div>
     <div className="flex-1 overflow-hidden">{children}</div>
   </div>
 );
 
-// ============ KEYBOARD SHORTCUTS MODAL ============
+// ============ SORTABLE HEADER ============
+const SortableHeader = ({ column, label, sortState, onSort, align = 'right', width }: { 
+  column: SortColumn; label: string; sortState: SortState; onSort: (col: SortColumn) => void; align?: 'left' | 'right'; width?: string;
+}) => {
+  const isActive = sortState.column === column && sortState.direction !== null;
+  const indicator = isActive ? (sortState.direction === 'desc' ? ' ▼' : ' ▲') : '';
+  return (
+    <th onClick={() => onSort(column)} style={{ width }} className={`px-2 py-2 font-medium cursor-pointer select-none transition-colors hover:bg-[#374151]/50 whitespace-nowrap ${align === 'left' ? 'text-left' : 'text-right'} ${isActive ? 'text-[#06b6d4]' : ''}`}>
+      {label}{indicator}
+    </th>
+  );
+};
+
+// ============ KEYBOARD MODAL ============
 const ShortcutsModal = ({ onClose }: { onClose: () => void }) => (
   <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={onClose}>
     <div className="bg-[#111827] border border-[#1e293b] rounded-lg p-4 max-w-md" onClick={e => e.stopPropagation()}>
       <h3 className="text-[#06b6d4] font-bold mb-4">⌨️ Keyboard Shortcuts</h3>
       <div className="grid grid-cols-2 gap-2 text-[12px]">
-        {[
-          ['↑ / ↓', 'Navigate rows'],
-          ['Enter', 'Select row'],
-          ['M', 'Toggle My Setups'],
-          ['S', 'Toggle Sound'],
-          ['R', 'Refresh data'],
-          ['1 / 2 / 3', 'Switch tabs'],
-          ['W', 'Add to watchlist'],
-          ['Esc', 'Deselect'],
-          ['?', 'Show shortcuts'],
-        ].map(([key, desc]) => (
+        {[['↑ / ↓', 'Navigate'], ['Enter', 'Select'], ['M', 'My Setups'], ['S', 'Sound'], ['R', 'Refresh'], ['1/2/3', 'Tabs'], ['W', 'Watchlist'], ['?', 'Help']].map(([key, desc]) => (
           <div key={key} className="flex items-center gap-2">
             <kbd className="px-2 py-0.5 bg-[#1e293b] rounded text-[#06b6d4] font-mono">{key}</kbd>
             <span className="text-[#94a3b8]">{desc}</span>
           </div>
         ))}
       </div>
-      <button onClick={onClose} className="mt-4 w-full py-1.5 bg-[#06b6d4]/20 text-[#06b6d4] rounded text-[11px]">Close</button>
+      <button onClick={onClose} className="mt-4 w-full py-2 bg-[#06b6d4]/20 text-[#06b6d4] rounded">Close</button>
     </div>
   </div>
 );
 
-// ============ CONTEXT MENU ============
-const ContextMenu = ({ x, y, onClose, onAddWatchlist, onOpenTV, onCopy }: {
-  x: number; y: number; onClose: () => void;
-  onAddWatchlist: () => void; onOpenTV: () => void; onCopy: () => void;
+// ============ JOURNAL SECTION ============
+const JournalSection = ({ title, icon, content, onChange, expanded, onToggle }: {
+  title: string; icon: string; content: string; onChange: (val: string) => void; expanded: boolean; onToggle: () => void;
 }) => (
-  <div className="fixed bg-[#1e293b] border border-[#374151] rounded shadow-lg py-1 z-50 text-[11px]" style={{ left: x, top: y }}>
-    <button onClick={() => { onAddWatchlist(); onClose(); }} className="w-full px-3 py-1.5 text-left hover:bg-[#06b6d4]/20 text-[#e2e8f0]">➕ Add to Watchlist</button>
-    <button onClick={() => { onOpenTV(); onClose(); }} className="w-full px-3 py-1.5 text-left hover:bg-[#06b6d4]/20 text-[#e2e8f0]">📈 Open in TradingView</button>
-    <button onClick={() => { onCopy(); onClose(); }} className="w-full px-3 py-1.5 text-left hover:bg-[#06b6d4]/20 text-[#e2e8f0]">📋 Copy Symbol</button>
+  <div className="border-b border-[#1e293b] last:border-0">
+    <button onClick={onToggle} className="w-full px-3 py-2 flex items-center justify-between hover:bg-[#1e293b]/30 transition-colors">
+      <span className="text-[11px] font-medium text-[#e2e8f0]">{icon} {title}</span>
+      <span className="text-[#64748b] text-[10px]">{expanded ? '▼' : '▶'}</span>
+    </button>
+    {expanded && (
+      <textarea
+        value={content}
+        onChange={e => onChange(e.target.value)}
+        placeholder={`Add ${title.toLowerCase()}...`}
+        className="w-full bg-[#0a0f14] resize-none px-3 py-2 text-[11px] text-[#e2e8f0] placeholder:text-[#64748b]/50 border-none min-h-[80px] focus:outline-none"
+      />
+    )}
   </div>
 );
 
-// ============ SORTABLE HEADER ============
-const SortableHeader = ({ 
-  column, 
-  label, 
-  sortState, 
-  onSort, 
-  align = 'right' 
-}: { 
-  column: SortColumn; 
-  label: string; 
-  sortState: SortState; 
-  onSort: (col: SortColumn) => void;
-  align?: 'left' | 'right';
-}) => {
-  const isActive = sortState.column === column && sortState.direction !== null;
-  const indicator = isActive ? (sortState.direction === 'desc' ? ' ▼' : ' ▲') : '';
-  
-  return (
-    <th 
-      onClick={() => onSort(column)}
-      className={`px-1.5 py-1.5 font-medium cursor-pointer select-none transition-colors hover:bg-[#374151]/50 ${
-        align === 'left' ? 'text-left' : 'text-right'
-      } ${isActive ? 'text-[#06b6d4]' : ''}`}
-    >
-      {label}{indicator}
-    </th>
-  );
-};
 
 // ============ MAIN APP ============
 function App() {
-  // Core state
+  // Scanner state
   const [activeTab, setActiveTab] = useState<ScannerTab>('gappers');
   const [stocks, setStocks] = useState<Record<ScannerTab, Stock[]>>(() => generateMockData());
   const [apiStatus, setApiStatus] = useState<ApiStatus>('offline');
@@ -341,93 +249,71 @@ function App() {
   const [selected, setSelected] = useState<Stock | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number>(-1);
   const [flashMap, setFlashMap] = useState<Record<string, 'up' | 'down' | null>>({});
-  const [chartInterval, setChartInterval] = useState<ChartInterval>('5');
+  const [isDemo, setIsDemo] = useState(false);
   
-  // Sorting state
+  // Sorting
   const [sortState, setSortState] = useState<SortState>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE.SCANNER_SORT);
-      return saved ? JSON.parse(saved) : DEFAULT_SORT;
-    } catch {
-      return DEFAULT_SORT;
-    }
+    try { return JSON.parse(localStorage.getItem(STORAGE.SCANNER_SORT) || '') || DEFAULT_SORT; } catch { return DEFAULT_SORT; }
   });
   
-  // My Setups filter
-  const [mySetupsOnly, setMySetupsOnly] = useState(() => {
-    try { return localStorage.getItem(STORAGE.MY_SETUPS) === 'true'; } catch { return false; }
-  });
-  
-  // Sound
-  const [soundEnabled, setSoundEnabled] = useState(() => {
-    try { return localStorage.getItem(STORAGE.SOUND_ENABLED) !== 'false'; } catch { return true; }
-  });
+  // Filters
+  const [mySetupsOnly, setMySetupsOnly] = useState(() => localStorage.getItem(STORAGE.MY_SETUPS) === 'true');
+  const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem(STORAGE.SOUND_ENABLED) !== 'false');
   
   // Watchlist
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>(() => {
     try { return JSON.parse(localStorage.getItem(STORAGE.WATCHLIST) || '[]'); } catch { return []; }
   });
-  const [notes, setNotes] = useState(() => localStorage.getItem(STORAGE.NOTES) || '');
   const [watchInput, setWatchInput] = useState('');
+  const [draggedItem, setDraggedItem] = useState<string | null>(null);
+  const [editingNote, setEditingNote] = useState<string | null>(null);
   
-  // Position Calculator
-  const [calcOpen, setCalcOpen] = useState(true);
-  const [accountSize, setAccountSize] = useState(() => {
-    try { return Number(localStorage.getItem(STORAGE.ACCOUNT)) || 25000; } catch { return 25000; }
+  // Journal
+  const [journalSections, setJournalSections] = useState<{ plan: string; ideas: string; lessons: string }>(() => {
+    try { return JSON.parse(localStorage.getItem(STORAGE.JOURNAL_SECTIONS) || '{}') || { plan: '', ideas: '', lessons: '' }; } 
+    catch { return { plan: '', ideas: '', lessons: '' }; }
   });
-  const [riskPercent, setRiskPercent] = useState(1);
-  const [entryPrice, setEntryPrice] = useState('');
-  const [stopLoss, setStopLoss] = useState('');
+  const [expandedSections, setExpandedSections] = useState<{ plan: boolean; ideas: boolean; lessons: boolean }>({ plan: true, ideas: true, lessons: false });
+  const [lastSaved, setLastSaved] = useState<string>('');
   
   // Alerts
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [alertedSymbols, setAlertedSymbols] = useState<Set<string>>(new Set());
   const [unreadAlertCount, setUnreadAlertCount] = useState(0);
-  const [newMoversCount, setNewMoversCount] = useState(0);
-  const [showAlertLog, setShowAlertLog] = useState(false);
-  const [alertSettings] = useState<AlertSettings>(DEFAULT_ALERT_SETTINGS);
+  const alertSettings: AlertSettings = { soundEnabled, volume: 0.3, changeThreshold: 3, rvolThreshold: 10 };
   
-  // UI State
+  // UI
   const [showShortcuts, setShowShortcuts] = useState(false);
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; stock: Stock } | null>(null);
   const [currentTime, setCurrentTime] = useState(formatTime());
   
-  // Refs
-  const notesTimeoutRef = useRef<number>();
+  // Search-loaded stocks (from direct API calls)
+  const [searchedStocks, setSearchedStocks] = useState<Map<string, Stock>>(new Map());
+  
   const prevStocksRef = useRef<Record<ScannerTab, Stock[]> | null>(null);
   const isFirstRender = useRef(true);
-  const chartRef = useRef<HTMLDivElement>(null);
+  const journalTimeoutRef = useRef<number>();
 
-  // Market status
   const preMarket = isPreMarket();
   const justOpened = isMarketJustOpened();
 
-  // Live clock
+  // Get all stocks for lookup (including searched stocks)
+  const allStocks = useMemo(() => {
+    const scannerStocks = [...stocks.gappers, ...stocks.momentum, ...stocks.highRvol];
+    const searched = Array.from(searchedStocks.values());
+    return [...scannerStocks, ...searched];
+  }, [stocks, searchedStocks]);
+
+  // Clock
   useEffect(() => {
     const interval = setInterval(() => setCurrentTime(formatTime()), 1000);
     return () => clearInterval(interval);
   }, []);
 
-  // Handle sorting
+  // Sort handler
   const handleSort = useCallback((column: SortColumn) => {
     setSortState(prev => {
-      let newDirection: SortDirection;
-      
-      if (prev.column !== column) {
-        // New column, start with desc
-        newDirection = 'desc';
-      } else if (prev.direction === 'desc') {
-        // Same column, was desc, now asc
-        newDirection = 'asc';
-      } else if (prev.direction === 'asc') {
-        // Same column, was asc, now reset
-        newDirection = null;
-      } else {
-        // Was null, start with desc
-        newDirection = 'desc';
-      }
-      
-      const newState = { column, direction: newDirection };
+      const newDir = prev.column !== column ? 'desc' : prev.direction === 'desc' ? 'asc' : prev.direction === 'asc' ? null : 'desc';
+      const newState = { column, direction: newDir };
       localStorage.setItem(STORAGE.SCANNER_SORT, JSON.stringify(newState));
       return newState;
     });
@@ -435,105 +321,51 @@ function App() {
 
   // Sort stocks
   const sortStocks = useCallback((stocksToSort: Stock[]): Stock[] => {
-    if (sortState.direction === null) {
-      return stocksToSort;
-    }
-    
-    const sorted = [...stocksToSort].sort((a, b) => {
-      let aVal: number | string;
-      let bVal: number | string;
-      
+    if (sortState.direction === null) return stocksToSort;
+    return [...stocksToSort].sort((a, b) => {
+      let aVal: number | string, bVal: number | string;
       switch (sortState.column) {
-        case 'time':
-          aVal = a.time;
-          bVal = b.time;
-          break;
-        case 'symbol':
-          aVal = a.symbol;
-          bVal = b.symbol;
-          break;
-        case 'price':
-          aVal = a.price;
-          bVal = b.price;
-          break;
-        case 'volume':
-          aVal = a.volume;
-          bVal = b.volume;
-          break;
-        case 'float':
-          aVal = a.float || 0;
-          bVal = b.float || 0;
-          break;
-        case 'rVol':
-          aVal = a.rVol;
-          bVal = b.rVol;
-          break;
-        case 'gapPercent':
-          aVal = a.gapPercent;
-          bVal = b.gapPercent;
-          break;
-        case 'changePercent':
-          aVal = a.changePercent;
-          bVal = b.changePercent;
-          break;
-        case 'vwapDistance':
-          aVal = a.vwapDistance;
-          bVal = b.vwapDistance;
-          break;
-        default:
-          return 0;
+        case 'time': aVal = a.time; bVal = b.time; break;
+        case 'symbol': aVal = a.symbol; bVal = b.symbol; break;
+        case 'price': aVal = a.price; bVal = b.price; break;
+        case 'volume': aVal = a.volume; bVal = b.volume; break;
+        case 'float': aVal = a.float || 0; bVal = b.float || 0; break;
+        case 'rVol': aVal = a.rVol; bVal = b.rVol; break;
+        case 'gapPercent': aVal = a.gapPercent; bVal = b.gapPercent; break;
+        case 'changePercent': aVal = a.changePercent; bVal = b.changePercent; break;
+        case 'vwapDistance': aVal = a.vwapDistance; bVal = b.vwapDistance; break;
+        default: return 0;
       }
-      
       if (typeof aVal === 'string' || typeof bVal === 'string') {
-        return sortState.direction === 'desc' 
-          ? String(bVal).localeCompare(String(aVal))
-          : String(aVal).localeCompare(String(bVal));
+        return sortState.direction === 'desc' ? String(bVal).localeCompare(String(aVal)) : String(aVal).localeCompare(String(bVal));
       }
-      
       return sortState.direction === 'desc' ? Number(bVal) - Number(aVal) : Number(aVal) - Number(bVal);
     });
-    
-    return sorted;
   }, [sortState]);
 
-  // Filtered and sorted stocks
+  // Filtered stocks
   const filteredStocks = useMemo(() => {
     let current = stocks[activeTab];
-    if (mySetupsOnly) {
-      current = current.filter(matchesCriteria);
-    }
+    if (mySetupsOnly) current = current.filter(matchesCriteria);
     return sortStocks(current);
   }, [stocks, activeTab, mySetupsOnly, sortStocks]);
 
-  const matchingCount = useMemo(() => {
-    return stocks[activeTab].filter(matchesCriteria).length;
-  }, [stocks, activeTab]);
+  const matchingCount = useMemo(() => stocks[activeTab].filter(matchesCriteria).length, [stocks, activeTab]);
 
   // Fetch data
   const fetchData = useCallback(async () => {
     setIsLoading(true);
-    console.log('📡 Fetching scanner data...');
-    
     try {
-      const prevData = prevStocksRef.current ? {
-        gappers: prevStocksRef.current.gappers,
-        momentum: prevStocksRef.current.momentum,
-        highRvol: prevStocksRef.current.highRvol,
-      } : undefined;
+      const prevData = prevStocksRef.current;
+      const data = await fetchScannerData(prevData ? { gappers: prevData.gappers, momentum: prevData.momentum, highRvol: prevData.highRvol } : undefined);
       
-      const data = await fetchScannerData(prevData);
-      console.log('✓ Data fetched:', data.gappers.length, 'gappers');
-      
-      // Track price flashes
-      const allNewStocks = [...data.gappers, ...data.momentum, ...data.highRvol];
+      const allNew = [...data.gappers, ...data.momentum, ...data.highRvol];
       const flashes: Record<string, 'up' | 'down' | null> = {};
       
       if (prevStocksRef.current) {
         const prevLookup = new Map<string, Stock>();
-        [...prevStocksRef.current.gappers, ...prevStocksRef.current.momentum, ...prevStocksRef.current.highRvol]
-          .forEach(s => prevLookup.set(s.symbol, s));
-        
-        allNewStocks.forEach(s => {
+        [...prevStocksRef.current.gappers, ...prevStocksRef.current.momentum, ...prevStocksRef.current.highRvol].forEach(s => prevLookup.set(s.symbol, s));
+        allNew.forEach(s => {
           const prev = prevLookup.get(s.symbol);
           if (prev) {
             if (s.price > prev.price) flashes[s.symbol] = 'up';
@@ -541,540 +373,432 @@ function App() {
           }
         });
       }
-      
       setFlashMap(flashes);
       setTimeout(() => setFlashMap({}), 600);
-      
-      // Detect alerts
+
+      // Alerts
       if (!isFirstRender.current && prevStocksRef.current) {
         const newAlerts: AlertItem[] = [];
         const time = formatTime();
         const timestamp = Date.now();
-        let newMovers = 0;
+        const prevSymbols = new Set([...prevStocksRef.current.gappers, ...prevStocksRef.current.momentum, ...prevStocksRef.current.highRvol].map(s => s.symbol));
         
-        const prevSymbols = new Set([
-          ...prevStocksRef.current.gappers.map(s => s.symbol),
-          ...prevStocksRef.current.momentum.map(s => s.symbol),
-          ...prevStocksRef.current.highRvol.map(s => s.symbol),
-        ]);
-        
-        allNewStocks.forEach(stock => {
-          const prevStock = prevStocksRef.current?.gappers.find(s => s.symbol === stock.symbol) ||
-                           prevStocksRef.current?.momentum.find(s => s.symbol === stock.symbol) ||
-                           prevStocksRef.current?.highRvol.find(s => s.symbol === stock.symbol);
-          
+        allNew.forEach(stock => {
           if (!prevSymbols.has(stock.symbol) && matchesCriteria(stock)) {
-            newAlerts.push({ id: `${stock.symbol}-new-${timestamp}`, symbol: stock.symbol, type: 'newMover', message: `🔥 ${stock.symbol} new to scanner`, time, timestamp });
-            newMovers++;
+            newAlerts.push({ id: `${stock.symbol}-new-${timestamp}`, symbol: stock.symbol, type: 'newMover', message: `🔥 ${stock.symbol} new`, time, timestamp });
             if (soundEnabled) playAlert('newMover', alertSettings.volume);
-          }
-          
-          if (prevStock) {
-            const changeDiff = stock.changePercent - prevStock.prevChangePercent;
-            if (changeDiff > alertSettings.changeThreshold) {
-              newAlerts.push({ id: `${stock.symbol}-spike-${timestamp}`, symbol: stock.symbol, type: 'breakout', message: `⚡ ${stock.symbol} +${changeDiff.toFixed(1)}% spike`, time, timestamp });
-              if (soundEnabled) playAlert('breakout', alertSettings.volume);
-            }
-            
-            if (stock.rVol >= alertSettings.rvolThreshold && prevStock.prevRVol < alertSettings.rvolThreshold) {
-              newAlerts.push({ id: `${stock.symbol}-rvol-${timestamp}`, symbol: stock.symbol, type: 'volumeSpike', message: `📊 ${stock.symbol} RVol ${stock.rVol.toFixed(1)}x`, time, timestamp });
-              if (soundEnabled) playAlert('volumeSpike', alertSettings.volume);
-            }
           }
         });
         
         if (newAlerts.length > 0) {
-          setAlerts(prev => [...newAlerts, ...prev].slice(0, 30));
+          setAlerts(prev => [...newAlerts, ...prev].slice(0, 20));
           setUnreadAlertCount(prev => prev + newAlerts.length);
-          setNewMoversCount(prev => prev + newMovers);
-          
-          const newAlertedSymbols = new Set(alertedSymbols);
-          newAlerts.forEach(a => newAlertedSymbols.add(a.symbol));
-          setAlertedSymbols(newAlertedSymbols);
-          
-          setTimeout(() => {
-            setAlertedSymbols(prev => {
-              const next = new Set(prev);
-              newAlerts.forEach(a => next.delete(a.symbol));
-              return next;
-            });
-          }, 30000);
+          const newAlerted = new Set(alertedSymbols);
+          newAlerts.forEach(a => newAlerted.add(a.symbol));
+          setAlertedSymbols(newAlerted);
+          setTimeout(() => setAlertedSymbols(prev => { const next = new Set(prev); newAlerts.forEach(a => next.delete(a.symbol)); return next; }), 30000);
         }
       }
-      
       isFirstRender.current = false;
-      
+
       setStocks({ gappers: data.gappers, momentum: data.momentum, highRvol: data.highRvol });
       prevStocksRef.current = { gappers: data.gappers, momentum: data.momentum, highRvol: data.highRvol };
-      
       setApiStatus(data.status);
       setLastUpdate(formatTime());
       
       if (selected) {
-        const allStocks = [...data.gappers, ...data.momentum, ...data.highRvol];
-        const found = allStocks.find(s => s.symbol === selected.symbol);
+        const found = allNew.find(s => s.symbol === selected.symbol);
         if (found) setSelected(found);
       }
-      
-      // Update watchlist prices
-      setWatchlist(prev => prev.map(item => {
-        const stock = allNewStocks.find(s => s.symbol === item.symbol);
-        if (stock) {
-          return { ...item, priceHistory: [...(item.priceHistory || []), stock.price].slice(-10) };
-        }
-        return item;
-      }));
-      
     } catch (error) {
-      console.error('❌ Failed to fetch data:', error);
-      setApiStatus('offline');
+      console.error('Fetch error:', error);
+
+      // Handle 403 errors by falling back to demo mode
+      if (error instanceof PolygonUpgradeError) {
+        console.warn('🎭 Switching to DEMO mode due to API restrictions');
+        const mockData = generateMockData();
+        setStocks(mockData);
+        prevStocksRef.current = mockData;
+        setIsDemo(true);
+        setApiStatus('offline');
+      } else {
+        setApiStatus('offline');
+      }
     } finally {
       setIsLoading(false);
     }
-  }, [selected, alertSettings, alertedSymbols, soundEnabled]);
+  }, [selected, alertSettings.volume, alertedSymbols, soundEnabled]);
 
-  // Initial fetch and polling
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 60000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+  useEffect(() => { fetchData(); const i = setInterval(fetchData, 60000); return () => clearInterval(i); }, [fetchData]);
 
-  // Persist preferences
+  // Persist
   useEffect(() => { localStorage.setItem(STORAGE.WATCHLIST, JSON.stringify(watchlist)); }, [watchlist]);
-  useEffect(() => { localStorage.setItem(STORAGE.ACCOUNT, String(accountSize)); }, [accountSize]);
   useEffect(() => { localStorage.setItem(STORAGE.MY_SETUPS, String(mySetupsOnly)); }, [mySetupsOnly]);
   useEffect(() => { localStorage.setItem(STORAGE.SOUND_ENABLED, String(soundEnabled)); }, [soundEnabled]);
   useEffect(() => {
-    if (notesTimeoutRef.current) clearTimeout(notesTimeoutRef.current);
-    notesTimeoutRef.current = window.setTimeout(() => localStorage.setItem(STORAGE.NOTES, notes), 500);
-  }, [notes]);
+    if (journalTimeoutRef.current) clearTimeout(journalTimeoutRef.current);
+    journalTimeoutRef.current = window.setTimeout(() => {
+      localStorage.setItem(STORAGE.JOURNAL_SECTIONS, JSON.stringify(journalSections));
+      setLastSaved(getTimestamp());
+    }, 1000);
+  }, [journalSections]);
 
+  // Keyboard
   useEffect(() => {
-    if (selected) setEntryPrice(selected.price.toFixed(2));
-  }, [selected]);
-
-  // Keyboard shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
+    const handleKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      
       switch (e.key) {
-        case 'ArrowUp':
-          e.preventDefault();
-          setSelectedIndex(prev => Math.max(0, prev - 1));
-          break;
-        case 'ArrowDown':
-          e.preventDefault();
-          setSelectedIndex(prev => Math.min(filteredStocks.length - 1, prev + 1));
-          break;
-        case 'Enter':
-          if (selectedIndex >= 0 && filteredStocks[selectedIndex]) {
-            setSelected(filteredStocks[selectedIndex]);
-            chartRef.current?.scrollIntoView({ behavior: 'smooth' });
-          }
-          break;
-        case 'm': case 'M': setMySetupsOnly(prev => !prev); break;
-        case 's': case 'S': setSoundEnabled(prev => !prev); break;
+        case 'ArrowUp': e.preventDefault(); setSelectedIndex(p => Math.max(0, p - 1)); break;
+        case 'ArrowDown': e.preventDefault(); setSelectedIndex(p => Math.min(filteredStocks.length - 1, p + 1)); break;
+        case 'Enter': if (selectedIndex >= 0 && filteredStocks[selectedIndex]) setSelected(filteredStocks[selectedIndex]); break;
+        case 'm': case 'M': setMySetupsOnly(p => !p); break;
+        case 's': case 'S': setSoundEnabled(p => !p); break;
         case 'r': case 'R': fetchData(); break;
         case '1': setActiveTab('gappers'); break;
         case '2': setActiveTab('momentum'); break;
         case '3': setActiveTab('highRvol'); break;
         case 'w': case 'W': if (selected) addToWatchlist(selected.symbol); break;
-        case 'Escape': setSelected(null); setSelectedIndex(-1); setContextMenu(null); break;
+        case 'Escape': setSelected(null); setSelectedIndex(-1); break;
         case '?': setShowShortcuts(true); break;
       }
     };
-    
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
   }, [filteredStocks, selectedIndex, selected, fetchData]);
 
   useEffect(() => {
-    if (selectedIndex >= 0 && filteredStocks[selectedIndex]) {
-      setSelected(filteredStocks[selectedIndex]);
-    }
+    if (selectedIndex >= 0 && filteredStocks[selectedIndex]) setSelected(filteredStocks[selectedIndex]);
   }, [selectedIndex, filteredStocks]);
 
-  useEffect(() => {
-    const handleClick = () => setContextMenu(null);
-    window.addEventListener('click', handleClick);
-    return () => window.removeEventListener('click', handleClick);
-  }, []);
-
+  // Watchlist
   const addToWatchlist = useCallback((symbol: string) => {
     const sym = symbol.trim().toUpperCase();
-    if (!sym) return;
-    const stock = [...stocks.gappers, ...stocks.momentum, ...stocks.highRvol].find(s => s.symbol === sym);
-    setWatchlist(prev => prev.some(w => w.symbol === sym) ? prev : [...prev, { 
-      symbol: sym, note: '', addedPrice: stock?.price || 0, color: 'none', priceHistory: stock ? [stock.price] : [],
-    }]);
+    if (!sym || watchlist.some(w => w.symbol === sym)) return;
+    setWatchlist(prev => [...prev, { id: Date.now().toString(), symbol: sym, note: '', color: 'none', addedAt: Date.now() }]);
     setWatchInput('');
-  }, [stocks]);
+  }, [watchlist]);
 
-  const removeFromWatchlist = useCallback((symbol: string) => {
-    setWatchlist(prev => prev.filter(w => w.symbol !== symbol));
+  const updateWatchItem = useCallback((id: string, updates: Partial<WatchlistItem>) => {
+    setWatchlist(prev => prev.map(w => w.id === id ? { ...w, ...updates } : w));
   }, []);
 
-  const updateWatchlistItem = useCallback((symbol: string, updates: Partial<WatchlistItem>) => {
-    setWatchlist(prev => prev.map(w => w.symbol === symbol ? { ...w, ...updates } : w));
+  const removeFromWatchlist = useCallback((id: string) => {
+    setWatchlist(prev => prev.filter(w => w.id !== id));
   }, []);
 
-  const openTradingView = (symbol: string) => window.open(`https://www.tradingview.com/chart/?symbol=${symbol}`, '_blank');
-  const copySymbol = async (symbol: string) => await navigator.clipboard.writeText(symbol);
+  const handleDragStart = (id: string) => setDraggedItem(id);
+  const handleDragOver = (e: React.DragEvent, targetId: string) => {
+    e.preventDefault();
+    if (!draggedItem || draggedItem === targetId) return;
+    setWatchlist(prev => {
+      const items = [...prev];
+      const dragIdx = items.findIndex(i => i.id === draggedItem);
+      const targetIdx = items.findIndex(i => i.id === targetId);
+      const [removed] = items.splice(dragIdx, 1);
+      items.splice(targetIdx, 0, removed);
+      return items;
+    });
+  };
+  const handleDragEnd = () => setDraggedItem(null);
 
-  const handleRowClick = (stock: Stock, index: number) => {
+  // Select stock from scanner or watchlist
+  const selectStock = useCallback((symbol: string) => {
+    const stock = allStocks.find(s => s.symbol === symbol);
+    if (stock) setSelected(stock);
+  }, [allStocks]);
+
+  // Handle search selection - store in searchedStocks map
+  const handleSearchSelect = useCallback((stock: Stock) => {
+    setSearchedStocks(prev => {
+      const next = new Map(prev);
+      next.set(stock.symbol, stock);
+      return next;
+    });
     setSelected(stock);
-    setSelectedIndex(index);
-    setShowChart(true); // Load chart immediately on row click
-    chartRef.current?.classList.add('chart-pulse');
-    setTimeout(() => chartRef.current?.classList.remove('chart-pulse'), 300);
+  }, []);
+
+  const handleRowClick = (stock: Stock, index: number) => { 
+    setSelected(stock); 
+    setSelectedIndex(index); 
   };
 
-  const handleRowDoubleClick = (stock: Stock) => openTradingView(stock.symbol);
-  const handleRowContextMenu = (e: React.MouseEvent, stock: Stock) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, stock }); };
-  const clearAlertCount = () => { setUnreadAlertCount(0); setNewMoversCount(0); };
+  const handleRowDoubleClick = (stock: Stock) => {
+    addToWatchlist(stock.symbol);
+  };
 
-  // Position Calculator
-  const entry = parseFloat(entryPrice) || 0;
-  const stop = parseFloat(stopLoss) || 0;
-  const riskDollar = accountSize * (riskPercent / 100);
-  const riskPerShare = entry - stop;
-  const positionSize = riskPerShare > 0 ? Math.floor(riskDollar / riskPerShare) : 0;
-  const positionValue = positionSize * entry;
-  const exceedsBuyingPower = positionValue > accountSize;
-
-  // Chart state - lazy loading
-  const [chartLoaded, setChartLoaded] = useState(false);
-  const [showChart, setShowChart] = useState(false);
-  const chartSymbol = selected ? `${selected.exchange}:${selected.symbol}` : 'NASDAQ:AAPL';
-  const chartUrl = `https://s.tradingview.com/widgetembed/?frameElementId=tv_widget&symbol=${chartSymbol}&interval=${chartInterval}&theme=dark&style=1&timezone=America%2FNew_York&hide_top_toolbar=1&hide_legend=0&save_image=0&hide_volume=0`;
-  
-  // Lazy load chart - show after 2s delay or immediately on selection
-  useEffect(() => {
-    if (selected) {
-      setShowChart(true);
-    } else {
-      const timer = setTimeout(() => setShowChart(true), 2000);
-      return () => clearTimeout(timer);
+  const handleWatchlistClick = async (symbol: string) => {
+    // First check if in scanner data
+    const scannerStock = allStocks.find(s => s.symbol === symbol);
+    if (scannerStock) {
+      setSelected(scannerStock);
+      return;
     }
-  }, []);
-  
-  // Reset chart loaded state when symbol/interval changes
-  useEffect(() => {
-    if (showChart) {
-      setChartLoaded(false);
+    
+    // If not in scanner, fetch from API
+    try {
+      const stock = await fetchTickerSnapshot(symbol);
+      if (stock) {
+        setSearchedStocks(prev => {
+          const next = new Map(prev);
+          next.set(stock.symbol, stock);
+          return next;
+        });
+        setSelected(stock);
+      }
+    } catch (err) {
+      console.error('Failed to fetch watchlist stock:', err);
     }
-  }, [chartSymbol, chartInterval, showChart]);
-
-  // Float data status
-  const hasFloatData = filteredStocks.some(s => s.float > 0);
+  };
 
   return (
-    <div className="h-full w-full flex flex-col bg-[#0a0f14] font-mono text-[#e2e8f0] grid-bg">
+    <div className="h-full w-full flex flex-col bg-[#0a0f14] font-mono text-[#e2e8f0]">
       {/* HEADER */}
-      <header className={`h-10 border-b border-[#1e293b] flex items-center justify-between px-4 shrink-0 ${
-        preMarket ? 'bg-gradient-to-r from-[#1e1b4b] to-[#312e81]' : 'bg-gradient-to-r from-[#0f1419] to-[#1a2332]'
-      }`}>
+      <header className="h-11 bg-gradient-to-r from-[#0f1419] to-[#1a2332] border-b border-[#1e293b] flex items-center justify-between px-4 shrink-0">
         <div className="flex items-center gap-4">
-          <h1 className="text-[#e2e8f0] font-semibold text-sm tracking-wide">
-            {preMarket ? '🌙 Pre-Market Scanner' : '📈 Day Trading Scanner'}
-          </h1>
-          
-          {justOpened && <span className="px-2 py-0.5 bg-[#10b981]/20 text-[#10b981] text-[10px] font-bold rounded animate-pulse">🔔 MARKET OPEN</span>}
+          <h1 className="text-[#e2e8f0] font-semibold text-sm">{preMarket ? '🌙 Pre-Market' : '📈 Day Trading'} Scanner</h1>
+          {isDemo && <span className="px-2 py-0.5 bg-[#f59e0b]/20 text-[#f59e0b] text-[10px] font-bold rounded">DEMO DATA</span>}
+          {justOpened && <span className="px-2 py-0.5 bg-[#10b981]/20 text-[#10b981] text-[10px] font-bold rounded animate-pulse">MARKET OPEN</span>}
           
           <div className="flex gap-1">
             {[{ id: 'gappers', label: 'Gappers' }, { id: 'momentum', label: 'Momentum' }, { id: 'highRvol', label: 'High RVol' }].map(tab => (
               <button key={tab.id} onClick={() => setActiveTab(tab.id as ScannerTab)}
-                className={`px-3 py-1 text-[11px] font-medium rounded transition-all ${
-                  activeTab === tab.id ? preMarket ? 'bg-[#8b5cf6] text-white' : 'bg-[#06b6d4] text-[#0a0f14]' : 'bg-[#111827] text-[#64748b] hover:text-[#e2e8f0]'
-                }`}>{tab.label}</button>
+                className={`px-3 py-1 text-[11px] font-medium rounded ${activeTab === tab.id ? 'bg-[#06b6d4] text-[#0a0f14]' : 'bg-[#111827] text-[#64748b] hover:text-[#e2e8f0]'}`}>{tab.label}</button>
             ))}
           </div>
           
           <button onClick={() => setMySetupsOnly(!mySetupsOnly)}
-            className={`px-3 py-1 text-[11px] font-medium rounded transition-all ${
-              mySetupsOnly ? 'bg-[#06b6d4] text-[#0a0f14] shadow-[0_0_10px_rgba(6,182,212,0.5)]' : 'bg-[#111827] text-[#64748b] hover:text-[#e2e8f0]'
-            }`}>🎯 My Setups ({matchingCount})</button>
-        </div>
-        
-        <div className="flex items-center gap-3">
-          {isLoading && <span className="text-[11px] text-[#64748b] animate-pulse">Updating...</span>}
-          
-          <button onClick={() => setSoundEnabled(!soundEnabled)} className={`px-2 py-1 rounded text-[14px] ${soundEnabled ? 'text-[#10b981]' : 'text-[#64748b]'}`} title={soundEnabled ? 'Sound ON' : 'Sound OFF'}>
-            {soundEnabled ? '🔊' : '🔇'}
+            className={`px-3 py-1 text-[11px] font-medium rounded ${mySetupsOnly ? 'bg-[#06b6d4] text-[#0a0f14] shadow-[0_0_10px_rgba(6,182,212,0.5)]' : 'bg-[#111827] text-[#64748b]'}`}>
+            🎯 My Setups ({matchingCount})
           </button>
-          
-          <button onClick={clearAlertCount}
-            className={`flex items-center gap-1.5 px-2 py-1 rounded text-[11px] transition-all ${
-              unreadAlertCount > 0 ? 'bg-amber-500/20 text-amber-400 animate-pulse' : 'bg-[#111827] text-[#64748b]'
-            }`}>🔔 {unreadAlertCount > 0 ? unreadAlertCount : '0'}</button>
-          
-          <button onClick={fetchData} disabled={isLoading} className="px-2 py-1 bg-[#111827] text-[#64748b] hover:text-[#e2e8f0] rounded text-[11px] disabled:opacity-50">↻</button>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <StockSearch onSelect={handleSearchSelect} />
+          {isLoading && <span className="text-[11px] text-[#64748b] animate-pulse">Updating...</span>}
+          <button onClick={() => setSoundEnabled(!soundEnabled)} className={`text-[14px] ${soundEnabled ? 'text-[#10b981]' : 'text-[#64748b]'}`}>{soundEnabled ? '🔊' : '🔇'}</button>
+          <button onClick={() => setUnreadAlertCount(0)} className={`px-2 py-1 rounded text-[11px] ${unreadAlertCount > 0 ? 'bg-amber-500/20 text-amber-400 animate-pulse' : 'bg-[#111827] text-[#64748b]'}`}>🔔 {unreadAlertCount}</button>
+          <button onClick={fetchData} disabled={isLoading} className="px-2 py-1 bg-[#111827] text-[#64748b] hover:text-[#e2e8f0] rounded text-[11px]">↻</button>
           <button onClick={() => setShowShortcuts(true)} className="px-2 py-1 bg-[#111827] text-[#64748b] hover:text-[#e2e8f0] rounded text-[11px]">?</button>
-          
           <div className="flex items-center gap-2 text-[11px]">
-            <span className={`w-2 h-2 rounded-full ${apiStatus === 'live' ? 'bg-[#10b981]' : apiStatus === 'delayed' ? 'bg-[#f59e0b]' : 'bg-[#ef4444]'} ${apiStatus !== 'offline' ? 'pulse-dot' : ''}`}></span>
-            <span className={apiStatus === 'live' ? 'text-[#10b981]' : apiStatus === 'delayed' ? 'text-[#f59e0b]' : 'text-[#ef4444]'}>
-              {apiStatus === 'delayed' ? '15m DELAY' : apiStatus.toUpperCase()}
-            </span>
-            {!hasFloatData && <span className="text-[#64748b]">• No Float</span>}
+            <span className={`w-2 h-2 rounded-full ${apiStatus === 'live' ? 'bg-[#10b981]' : apiStatus === 'delayed' ? 'bg-[#f59e0b]' : 'bg-[#ef4444]'} pulse-dot`}></span>
+            <span className={apiStatus === 'live' ? 'text-[#10b981]' : apiStatus === 'delayed' ? 'text-[#f59e0b]' : 'text-[#ef4444]'}>{apiStatus === 'delayed' ? '15m DELAY' : apiStatus.toUpperCase()}</span>
           </div>
         </div>
       </header>
 
       {/* STATS BAR */}
       <div className="h-7 bg-[#111827] border-b border-[#1e293b] px-4 flex items-center gap-6 text-[11px] shrink-0">
-        <span className="text-[#64748b]">📊 <span className="text-[#e2e8f0]">{stocks[activeTab].length}</span> Total</span>
-        <span className="text-[#64748b]">🎯 <span className="text-[#06b6d4]">{matchingCount}</span> Match</span>
-        <span className="text-[#64748b]">🔥 <span className="text-[#f59e0b]">{newMoversCount}</span> New</span>
-        <span className="text-[#64748b]">
-          Sort: <span className="text-[#06b6d4]">{sortState.column}</span>
-          {sortState.direction && <span className="text-[#64748b]"> {sortState.direction === 'desc' ? '▼' : '▲'}</span>}
-        </span>
+        <span className="text-[#64748b]">📊 <span className="text-[#e2e8f0]">{stocks[activeTab].length}</span></span>
+        <span className="text-[#64748b]">🎯 <span className="text-[#06b6d4]">{matchingCount}</span></span>
         <span className="text-[#64748b]">Updated: <span className="text-[#e2e8f0]">{lastUpdate}</span></span>
-        <span className="ml-auto text-[#64748b]">⏱ <span className="text-[#e2e8f0] font-mono">{currentTime}</span></span>
+        <span className="ml-auto text-[#64748b]">⏱ <span className="text-[#e2e8f0]">{currentTime}</span></span>
       </div>
 
       {/* MAIN */}
       <main className="flex-1 flex gap-2 p-2 overflow-hidden">
         
-        {/* LEFT - SCANNER TABLE */}
-        <Panel title="Scanner" className="w-[45%]" preMarket={preMarket} headerRight={<span className="text-[10px] text-[#64748b]">{filteredStocks.length} shown</span>}>
-          <div className="h-full flex flex-col">
-            <div className="flex-1 overflow-auto">
+        {/* LEFT SIDE */}
+        <div className="w-[60%] flex flex-col gap-2">
+          
+          {/* SCANNER */}
+          <Panel title="Scanner" className="flex-[2]" headerRight={<span className="text-[10px] text-[#64748b]">{filteredStocks.length} • Double-click to add</span>}>
+            <div className="h-full overflow-auto">
               <table className="w-full border-collapse text-[11px]">
-                <thead className="sticky top-0 z-10">
-                  <tr className={`uppercase tracking-wider ${preMarket ? 'bg-[#1e1b4b]' : 'bg-[#1e293b]'} text-[#64748b]`}>
-                    <SortableHeader column="time" label="Time" sortState={sortState} onSort={handleSort} align="left" />
-                    <SortableHeader column="symbol" label="Sym" sortState={sortState} onSort={handleSort} align="left" />
-                    <SortableHeader column="price" label="Price" sortState={sortState} onSort={handleSort} />
-                    <SortableHeader column="volume" label="Vol" sortState={sortState} onSort={handleSort} />
-                    <SortableHeader column="float" label="Float" sortState={sortState} onSort={handleSort} />
-                    <SortableHeader column="rVol" label="RVol" sortState={sortState} onSort={handleSort} />
-                    <SortableHeader column="gapPercent" label="Gap%" sortState={sortState} onSort={handleSort} />
-                    <SortableHeader column="changePercent" label="Chg%" sortState={sortState} onSort={handleSort} />
-                    <SortableHeader column="vwapDistance" label="VWAP" sortState={sortState} onSort={handleSort} />
+                <thead className="sticky top-0 z-10 bg-[#1e293b] text-[#64748b] uppercase tracking-wider">
+                  <tr>
+                    <SortableHeader column="time" label="Time" sortState={sortState} onSort={handleSort} align="left" width="60px" />
+                    <SortableHeader column="symbol" label="Sym" sortState={sortState} onSort={handleSort} align="left" width="60px" />
+                    <SortableHeader column="price" label="Price" sortState={sortState} onSort={handleSort} width="70px" />
+                    <SortableHeader column="volume" label="Vol" sortState={sortState} onSort={handleSort} width="65px" />
+                    <SortableHeader column="float" label="Float" sortState={sortState} onSort={handleSort} width="65px" />
+                    <SortableHeader column="rVol" label="RVol" sortState={sortState} onSort={handleSort} width="55px" />
+                    <SortableHeader column="gapPercent" label="Gap%" sortState={sortState} onSort={handleSort} width="70px" />
+                    <SortableHeader column="changePercent" label="Chg%" sortState={sortState} onSort={handleSort} width="70px" />
+                    <SortableHeader column="vwapDistance" label="VWAP" sortState={sortState} onSort={handleSort} width="65px" />
                   </tr>
                 </thead>
                 <tbody>
                   {filteredStocks.map((stock, index) => {
-                    const isSelected = selected?.symbol === stock.symbol || selectedIndex === index;
+                    const isSelected = selected?.symbol === stock.symbol;
                     const flash = flashMap[stock.symbol];
                     const isAlerted = alertedSymbols.has(stock.symbol);
                     const vwapStyle = getVwapColor(stock.vwapDistance);
                     const meetsSetup = matchesCriteria(stock);
                     
                     return (
-                      <tr key={stock.symbol} onClick={() => handleRowClick(stock, index)} onDoubleClick={() => handleRowDoubleClick(stock)} onContextMenu={(e) => handleRowContextMenu(e, stock)}
-                        className={`h-7 border-b border-[#1e293b]/50 cursor-pointer transition-all duration-150 row-hover ${
-                          flash === 'up' ? 'flash-green' : flash === 'down' ? 'flash-red' : ''
-                        } ${isAlerted ? 'alert-flash' : ''} ${isSelected ? 'bg-[rgba(6,182,212,0.15)] selected-row' : ''}`}
-                        style={{ borderLeft: isSelected ? '3px solid #06b6d4' : isAlerted ? '4px solid #f59e0b' : undefined }}>
-                        <td className="px-1.5 text-[#64748b] text-[10px]">{stock.time}</td>
-                        <td className="px-1.5">
-                          <div className="flex items-center gap-1">
-                            <span className={`font-semibold ${meetsSetup ? 'text-[#06b6d4]' : 'text-[#e2e8f0]'}`}>{stock.symbol}</span>
-                            {isAlerted && <span className="text-[10px]">🔥</span>}
-                            {meetsSetup && <span className="text-[8px]">🎯</span>}
-                          </div>
+                      <tr key={stock.symbol} 
+                        onClick={() => handleRowClick(stock, index)}
+                        onDoubleClick={() => handleRowDoubleClick(stock)}
+                        className={`h-7 border-b border-[#1e293b]/50 cursor-pointer transition-all ${flash === 'up' ? 'flash-green' : flash === 'down' ? 'flash-red' : ''} ${isAlerted ? 'alert-flash' : ''} ${isSelected ? 'bg-[rgba(6,182,212,0.15)]' : 'hover:bg-[rgba(6,182,212,0.08)]'}`}
+                        style={{ borderLeft: isSelected ? '3px solid #06b6d4' : isAlerted ? '3px solid #f59e0b' : undefined }}>
+                        <td className="px-2 text-[#64748b] text-[10px]">{stock.time}</td>
+                        <td className="px-2">
+                          <span className={`font-semibold ${meetsSetup ? 'text-[#06b6d4]' : 'text-[#e2e8f0]'}`}>{stock.symbol}</span>
+                          {meetsSetup && <span className="ml-1 text-[8px]">🎯</span>}
                         </td>
-                        <td className="px-1.5 text-right">${stock.price.toFixed(2)}</td>
-                        <td className="px-1.5 text-right" style={{ backgroundColor: getVolumeColor(stock.volume) }}>{formatNum(stock.volume)}</td>
-                        <td className="px-1.5 text-right" style={{ backgroundColor: getFloatColor(stock.float) }}>{stock.float > 0 ? formatNum(stock.float) : '-'}</td>
-                        <td className="px-1.5 text-right font-medium" style={{ backgroundColor: getRvolColor(stock.rVol) }}>{stock.rVol.toFixed(1)}x</td>
-                        <td className="px-1.5 text-right" style={{ backgroundColor: getPercentColor(stock.gapPercent), color: stock.gapPercent >= 0 ? '#10b981' : '#ef4444' }}>{formatPct(stock.gapPercent)}</td>
-                        <td className="px-1.5 text-right" style={{ backgroundColor: getPercentColor(stock.changePercent), color: stock.changePercent >= 0 ? '#10b981' : '#ef4444' }}>{formatPct(stock.changePercent)}</td>
-                        <td className="px-1.5 text-right" style={{ backgroundColor: vwapStyle.bg, color: vwapStyle.text }}>{formatPct(stock.vwapDistance)}</td>
+                        <td className="px-2 text-right">${stock.price.toFixed(2)}</td>
+                        <td className="px-2 text-right" style={{ backgroundColor: getVolumeColor(stock.volume) }}>{formatNum(stock.volume)}</td>
+                        <td className="px-2 text-right" style={{ backgroundColor: getFloatColor(stock.float) }}>{stock.float > 0 ? formatNum(stock.float) : '-'}</td>
+                        <td className="px-2 text-right font-medium" style={{ backgroundColor: getRvolColor(stock.rVol) }}>{stock.rVol.toFixed(1)}x</td>
+                        <td className="px-2 text-right whitespace-nowrap" style={{ backgroundColor: getPercentColor(stock.gapPercent), color: stock.gapPercent >= 0 ? '#10b981' : '#ef4444' }}>{formatPct(stock.gapPercent)}</td>
+                        <td className="px-2 text-right whitespace-nowrap" style={{ backgroundColor: getPercentColor(stock.changePercent), color: stock.changePercent >= 0 ? '#10b981' : '#ef4444' }}>{formatPct(stock.changePercent)}</td>
+                        <td className="px-2 text-right whitespace-nowrap" style={{ backgroundColor: vwapStyle.bg, color: vwapStyle.text }}>{formatPct(stock.vwapDistance)}</td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
             </div>
-            
-            <div className="h-6 bg-[#1e293b] border-t border-[#1e293b] px-2 flex items-center justify-between text-[10px] text-[#64748b] shrink-0">
-              <span>Click headers to sort • Press ? for shortcuts</span>
-              <button onClick={() => setShowAlertLog(!showAlertLog)} className="text-[#06b6d4] hover:underline">{showAlertLog ? 'Hide' : 'Show'} Alerts</button>
-            </div>
-            
-            {showAlertLog && (
-              <div className="max-h-28 overflow-auto bg-[#0a0f14] border-t border-[#1e293b]">
-                {alerts.length === 0 ? <div className="px-2 py-2 text-[10px] text-[#64748b]">No alerts yet</div> : (
-                  <ul>
-                    {alerts.slice(0, 10).map(alert => (
-                      <li key={alert.id} className="px-2 py-1 border-b border-[#1e293b]/30 text-[10px] flex items-center gap-2">
-                        <span className="flex-1">{alert.message}</span>
-                        <span className="text-[#64748b]">{alert.time}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            )}
-          </div>
-        </Panel>
-
-        {/* MIDDLE - CHART */}
-        <div className="w-[30%] flex flex-col gap-2">
-          <Panel title="Chart" className="flex-1" preMarket={preMarket}>
-            <div ref={chartRef} className="h-full flex flex-col transition-all">
-              <div className="px-2 py-1 bg-[#1e293b]/50 flex items-center justify-between shrink-0">
-                <span className={`text-[11px] font-medium ${preMarket ? 'text-[#8b5cf6]' : 'text-[#06b6d4]'}`}>{selected?.symbol || 'AAPL'}</span>
-                <div className="flex gap-1">
-                  {(['1', '5', '15', 'D'] as ChartInterval[]).map(int => (
-                    <button key={int} onClick={() => setChartInterval(int)}
-                      className={`px-2 py-0.5 text-[10px] rounded ${chartInterval === int ? preMarket ? 'bg-[#8b5cf6] text-white' : 'bg-[#06b6d4] text-[#0a0f14]' : 'bg-[#111827] text-[#64748b] hover:text-[#e2e8f0]'}`}>
-                      {int === 'D' ? '1D' : int + 'm'}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="flex-1 relative">
-                {/* Loading skeleton */}
-                {(!showChart || !chartLoaded) && (
-                  <div className="absolute inset-0 bg-[#0a0f14] flex flex-col items-center justify-center gap-3">
-                    <div className="text-2xl font-bold text-[#06b6d4]">{selected?.symbol || 'AAPL'}</div>
-                    <div className="flex items-center gap-2 text-[11px] text-[#64748b]">
-                      <div className="w-4 h-4 border-2 border-[#06b6d4] border-t-transparent rounded-full animate-spin"></div>
-                      Loading chart...
-                    </div>
-                    <div className="w-32 h-1 bg-[#1e293b] rounded overflow-hidden">
-                      <div className="h-full bg-[#06b6d4] animate-pulse" style={{ width: '60%' }}></div>
-                    </div>
-                  </div>
-                )}
-                {/* Chart iframe - lazy loaded */}
-                {showChart && (
-                  <iframe 
-                    src={chartUrl} 
-                    className={`w-full h-full border-0 transition-opacity duration-300 ${chartLoaded ? 'opacity-100' : 'opacity-0'}`}
-                    title="TradingView Chart"
-                    loading="lazy"
-                    onLoad={() => setChartLoaded(true)}
-                  />
-                )}
-              </div>
-            </div>
-          </Panel>
-
-          {/* POSITION CALCULATOR */}
-          <Panel title="Position Calculator" className="shrink-0" preMarket={preMarket}>
-            <div className="px-2 py-1.5 bg-[#1e293b]/50 flex items-center justify-between cursor-pointer" onClick={() => setCalcOpen(!calcOpen)}>
-              <span className="text-[10px] text-[#64748b]">{calcOpen ? '▼' : '▶'}</span>
-            </div>
-            {calcOpen && (
-              <div className="p-2 space-y-2">
-                <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-[9px] text-[#64748b] uppercase">Account</label><input type="number" value={accountSize} onChange={e => setAccountSize(Number(e.target.value))} className="w-full bg-[#0a0f14] border border-[#1e293b] rounded px-2 py-1 text-[11px] text-[#e2e8f0]" /></div>
-                  <div><label className="text-[9px] text-[#64748b] uppercase">Risk %</label><input type="number" value={riskPercent} onChange={e => setRiskPercent(Number(e.target.value))} className="w-full bg-[#0a0f14] border border-[#1e293b] rounded px-2 py-1 text-[11px] text-[#e2e8f0]" /></div>
-                  <div><label className="text-[9px] text-[#64748b] uppercase">Entry</label><input type="text" value={entryPrice} onChange={e => setEntryPrice(e.target.value)} className="w-full bg-[#0a0f14] border border-[#1e293b] rounded px-2 py-1 text-[11px] text-[#e2e8f0]" /></div>
-                  <div><label className="text-[9px] text-[#64748b] uppercase">Stop</label><input type="text" value={stopLoss} onChange={e => setStopLoss(e.target.value)} className="w-full bg-[#0a0f14] border border-[#1e293b] rounded px-2 py-1 text-[11px] text-[#e2e8f0]" /></div>
-                </div>
-                <div className="bg-[#0a0f14] rounded p-2 space-y-1 text-[10px]">
-                  <div className="flex justify-between"><span className="text-[#64748b]">Risk $</span><span className="text-[#f59e0b]">${riskDollar.toFixed(0)}</span></div>
-                  <div className="flex justify-between"><span className="text-[#64748b]">Size</span><span className="text-[#06b6d4] font-bold">{positionSize} shares</span></div>
-                  <div className="flex justify-between"><span className="text-[#64748b]">Value</span><span className={exceedsBuyingPower ? 'text-[#ef4444]' : ''}>${positionValue.toFixed(0)}</span></div>
-                  {exceedsBuyingPower && <div className="text-[#ef4444]">⚠ Exceeds BP!</div>}
-                </div>
-              </div>
-            )}
-          </Panel>
-        </div>
-
-        {/* RIGHT PANEL */}
-        <section className="w-[25%] flex flex-col gap-2 overflow-hidden">
-          
-          {/* STOCK QUOTE */}
-          <Panel title="Stock Quote" className="shrink-0" preMarket={preMarket}>
-            <div className="p-2">
-              {selected ? (
-                <>
-                  <div className="flex items-baseline gap-2 mb-1">
-                    <span className={`text-xl font-bold ${preMarket ? 'text-[#8b5cf6]' : 'text-[#06b6d4]'}`}>{selected.symbol}</span>
-                    <span className="text-lg font-bold text-[#e2e8f0]">${selected.price.toFixed(2)}</span>
-                    <span className={`text-sm font-medium ${selected.changePercent >= 0 ? 'text-[#10b981]' : 'text-[#ef4444]'}`}>{formatPct(selected.changePercent)}</span>
-                  </div>
-                  <div className="text-[9px] text-[#64748b] mb-3">{selected.exchange} • {selected.time}</div>
-                  
-                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px] mb-3">
-                    <div className="flex justify-between"><span className="text-[#64748b]">Float</span><span className={selected.float > 0 && selected.float < 20000000 ? 'text-[#06b6d4]' : ''}>{selected.float > 0 ? formatNum(selected.float) : 'N/A'}</span></div>
-                    <div className="flex justify-between"><span className="text-[#64748b]">MCap</span><span>{selected.marketCap > 0 ? formatNum(selected.marketCap) : 'N/A'}</span></div>
-                    <div className="flex justify-between"><span className="text-[#64748b]">VWAP</span><span>${selected.vwap.toFixed(2)}</span></div>
-                    <div className="flex justify-between"><span className="text-[#64748b]">Volume</span><span>{formatNum(selected.volume)}</span></div>
-                    <div className="flex justify-between"><span className="text-[#64748b]">RVol</span><span className="text-[#06b6d4]">{selected.rVol.toFixed(1)}x</span></div>
-                    <div className="flex justify-between"><span className="text-[#64748b]">Gap%</span><span className={selected.gapPercent >= 0 ? 'text-[#10b981]' : 'text-[#ef4444]'}>{formatPct(selected.gapPercent)}</span></div>
-                    <div className="flex justify-between"><span className="text-[#64748b]">High</span><span className="text-[#10b981]">${selected.dayHigh.toFixed(2)}</span></div>
-                    <div className="flex justify-between"><span className="text-[#64748b]">Low</span><span className="text-[#ef4444]">${selected.dayLow.toFixed(2)}</span></div>
-                  </div>
-                  
-                  <div className="flex flex-wrap gap-1 mb-3">
-                    {selected.strategy.map((s, i) => (
-                      <span key={i} className={`px-1.5 py-0.5 text-[9px] rounded ${s.includes('🎯') ? 'bg-[#06b6d4]/30 text-[#06b6d4]' : 'bg-[#f59e0b]/20 text-[#f59e0b]'}`}>{s}</span>
-                    ))}
-                  </div>
-                  
-                  <div className="flex gap-2">
-                    <button onClick={() => addToWatchlist(selected.symbol)} className="flex-1 py-1 bg-[#06b6d4]/20 hover:bg-[#06b6d4]/30 text-[#06b6d4] text-[10px] rounded">+ Watch</button>
-                    <button onClick={() => openTradingView(selected.symbol)} className="flex-1 py-1 bg-[#111827] hover:bg-[#1e293b] text-[#e2e8f0] text-[10px] rounded">📈 TV</button>
-                  </div>
-                </>
-              ) : <div className="text-center py-6 text-[#64748b] text-[11px]">Select a symbol</div>}
-            </div>
           </Panel>
 
           {/* WATCHLIST */}
-          <Panel title={`Watchlist (${watchlist.length})`} className="flex-1 min-h-0" preMarket={preMarket}>
-            <div className="h-full flex flex-col">
-              <div className="px-2 py-1.5 border-b border-[#1e293b] shrink-0">
-                <div className="flex gap-1">
-                  <input type="text" value={watchInput} onChange={e => setWatchInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && addToWatchlist(watchInput)} placeholder="Add symbol..." className="flex-1 bg-[#0a0f14] border border-[#1e293b] rounded px-2 py-0.5 text-[10px] text-[#e2e8f0] placeholder:text-[#64748b]" />
-                  <button onClick={() => addToWatchlist(watchInput)} className="px-2 bg-[#06b6d4]/20 text-[#06b6d4] rounded text-[10px] font-bold">+</button>
-                </div>
-              </div>
-              <div className="flex-1 overflow-auto">
-                {watchlist.length === 0 ? <div className="text-center py-4 text-[#64748b] text-[10px]">Press W to add selected</div> : (
-                  <ul>
+          <Panel title={`Watchlist (${watchlist.length})`} className="flex-1 min-h-[180px]" headerRight={
+            <div className="flex gap-1">
+              <input type="text" value={watchInput} onChange={e => setWatchInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && addToWatchlist(watchInput)}
+                placeholder="Add symbol..." className="w-24 bg-[#0a0f14] border border-[#1e293b] rounded px-2 py-0.5 text-[10px] text-[#e2e8f0]" />
+              <button onClick={() => addToWatchlist(watchInput)} className="px-2 bg-[#06b6d4]/20 text-[#06b6d4] rounded text-[10px]">+</button>
+            </div>
+          }>
+            <div className="h-full overflow-auto">
+              {watchlist.length === 0 ? (
+                <div className="text-center py-8 text-[#64748b] text-[11px]">Press W or double-click scanner row</div>
+              ) : (
+                <table className="w-full text-[11px]">
+                  <thead className="sticky top-0 bg-[#1e293b] text-[#64748b] uppercase text-[10px]">
+                    <tr>
+                      <th className="px-2 py-2 text-left w-8">Tag</th>
+                      <th className="px-2 py-2 text-left">Symbol</th>
+                      <th className="px-2 py-2 text-right">Price</th>
+                      <th className="px-2 py-2 text-right">Chg%</th>
+                      <th className="px-2 py-2 text-left">Notes</th>
+                      <th className="px-2 py-2 w-6"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
                     {watchlist.map(item => {
-                      const stock = [...stocks.gappers, ...stocks.momentum, ...stocks.highRvol].find(s => s.symbol === item.symbol);
-                      const priceChange = stock && item.addedPrice ? ((stock.price - item.addedPrice) / item.addedPrice) * 100 : 0;
-                      const bigMove = Math.abs(priceChange) > 5;
-                      
+                      const stock = allStocks.find(s => s.symbol === item.symbol);
+                      const isWatchSelected = selected?.symbol === item.symbol;
                       return (
-                        <li key={item.symbol} className="px-2 py-1.5 border-b border-[#1e293b]/30 hover:bg-[#0a0f14]/50">
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <button onClick={() => updateWatchlistItem(item.symbol, { color: item.color === 'green' ? 'yellow' : item.color === 'yellow' ? 'red' : item.color === 'red' ? 'none' : 'green' })} className="text-[10px]">
-                                {item.color === 'green' ? '🟢' : item.color === 'yellow' ? '🟡' : item.color === 'red' ? '🔴' : '⚪'}
-                              </button>
-                              <span className="text-[#06b6d4] font-medium text-[10px] cursor-pointer hover:underline" onClick={() => stock && setSelected(stock)}>{item.symbol}</span>
-                              {bigMove && <span className="text-[8px]">⚠️</span>}
-                            </div>
-                            <div className="flex items-center gap-2">
-                              {stock && (<><span className="text-[10px] text-[#e2e8f0]">${stock.price.toFixed(2)}</span><span className={`text-[9px] ${stock.changePercent >= 0 ? 'text-[#10b981]' : 'text-[#ef4444]'}`}>{formatPct(stock.changePercent)}</span></>)}
-                              {item.priceHistory?.length > 1 && <Sparkline data={item.priceHistory} width={40} height={14} />}
-                              <button onClick={() => removeFromWatchlist(item.symbol)} className="text-[#64748b] hover:text-[#ef4444] text-[9px]">✕</button>
-                            </div>
-                          </div>
-                          <input type="text" value={item.note} onChange={e => updateWatchlistItem(item.symbol, { note: e.target.value })} placeholder="Note..." className="w-full bg-transparent text-[9px] text-[#64748b] placeholder:text-[#64748b]/50 py-0.5 border-b border-transparent focus:border-[#06b6d4]" />
-                        </li>
+                        <tr key={item.id} draggable onDragStart={() => handleDragStart(item.id)} onDragOver={e => handleDragOver(e, item.id)} onDragEnd={handleDragEnd}
+                          onClick={() => handleWatchlistClick(item.symbol)}
+                          className={`border-b border-[#1e293b]/30 cursor-pointer transition-all ${draggedItem === item.id ? 'opacity-50' : ''} ${isWatchSelected ? 'bg-[rgba(6,182,212,0.15)]' : 'hover:bg-[#0a0f14]/50'}`}
+                          style={{ borderLeft: isWatchSelected ? '3px solid #06b6d4' : undefined }}>
+                          <td className="px-2 py-1.5">
+                            <button onClick={e => { e.stopPropagation(); updateWatchItem(item.id, { color: item.color === 'green' ? 'yellow' : item.color === 'yellow' ? 'red' : item.color === 'red' ? 'none' : 'green' }); }} className="text-[12px]">
+                              {item.color === 'green' ? '🟢' : item.color === 'yellow' ? '🟡' : item.color === 'red' ? '🔴' : '⚪'}
+                            </button>
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <span className="text-[#06b6d4] font-medium">{item.symbol}</span>
+                          </td>
+                          <td className="px-2 py-1.5 text-right">{stock ? `$${stock.price.toFixed(2)}` : '-'}</td>
+                          <td className="px-2 py-1.5 text-right">
+                            {stock && <span className={stock.changePercent >= 0 ? 'text-[#10b981]' : 'text-[#ef4444]'}>{formatPct(stock.changePercent)}</span>}
+                          </td>
+                          <td className="px-2 py-1.5" onClick={e => e.stopPropagation()}>
+                            {editingNote === item.id ? (
+                              <input type="text" value={item.note} onChange={e => updateWatchItem(item.id, { note: e.target.value })} 
+                                onBlur={() => setEditingNote(null)} onKeyDown={e => e.key === 'Enter' && setEditingNote(null)}
+                                autoFocus className="w-full bg-[#0a0f14] border border-[#06b6d4] rounded px-1 py-0.5 text-[10px] text-[#e2e8f0]" />
+                            ) : (
+                              <span onClick={() => setEditingNote(item.id)} className="text-[10px] text-[#94a3b8] cursor-text hover:text-[#e2e8f0] block truncate max-w-[120px]">
+                                {item.note || 'Click to add note...'}
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <button onClick={e => { e.stopPropagation(); removeFromWatchlist(item.id); }} className="text-[#64748b] hover:text-[#ef4444] text-[10px]">✕</button>
+                          </td>
+                        </tr>
                       );
                     })}
-                  </ul>
-                )}
-              </div>
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </Panel>
+        </div>
+
+        {/* RIGHT SIDE */}
+        <div className="w-[40%] flex flex-col gap-2">
+          
+          {/* STOCK QUOTE */}
+          <Panel title="Stock Quote" className="shrink-0">
+            <div className="p-3">
+              {selected ? (
+                <>
+                  <div className="flex items-baseline gap-3 mb-2">
+                    <span className="text-2xl font-bold text-[#06b6d4]">{selected.symbol}</span>
+                    <span className="text-xl font-bold text-[#e2e8f0]">${selected.price.toFixed(2)}</span>
+                    <span className={`text-sm font-medium ${selected.changePercent >= 0 ? 'text-[#10b981]' : 'text-[#ef4444]'}`}>{formatPct(selected.changePercent)}</span>
+                  </div>
+                  
+                  {selected.sector && <div className="text-[10px] text-[#64748b] mb-3">{selected.sector} • {selected.exchange}</div>}
+                  
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-[11px] mb-4">
+                    <div className="flex justify-between"><span className="text-[#64748b]">Float</span><span className={selected.float > 0 && selected.float < 20000000 ? 'text-[#06b6d4] font-medium' : ''}>{selected.float > 0 ? formatNum(selected.float) : 'N/A'}</span></div>
+                    <div className="flex justify-between"><span className="text-[#64748b]">Market Cap</span><span>{selected.marketCap > 0 ? formatNum(selected.marketCap) : 'N/A'}</span></div>
+                    <div className="flex justify-between"><span className="text-[#64748b]">RVol</span><span className="text-[#06b6d4] font-medium">{selected.rVol.toFixed(1)}x</span></div>
+                    <div className="flex justify-between"><span className="text-[#64748b]">Gap%</span><span className={selected.gapPercent >= 0 ? 'text-[#10b981]' : 'text-[#ef4444]'}>{formatPct(selected.gapPercent)}</span></div>
+                    <div className="flex justify-between"><span className="text-[#64748b]">Day High</span><span className="text-[#10b981]">${selected.dayHigh.toFixed(2)}</span></div>
+                    <div className="flex justify-between"><span className="text-[#64748b]">Day Low</span><span className="text-[#ef4444]">${selected.dayLow.toFixed(2)}</span></div>
+                    <div className="flex justify-between"><span className="text-[#64748b]">VWAP</span><span>${selected.vwap.toFixed(2)}</span></div>
+                    <div className="flex justify-between"><span className="text-[#64748b]">Volume</span><span>{formatNum(selected.volume)}</span></div>
+                    <div className="flex justify-between"><span className="text-[#64748b]">52W High</span><span>{selected.high52w > 0 ? `$${selected.high52w.toFixed(2)}` : 'N/A'}</span></div>
+                    <div className="flex justify-between"><span className="text-[#64748b]">52W Low</span><span>{selected.low52w > 0 ? `$${selected.low52w.toFixed(2)}` : 'N/A'}</span></div>
+                  </div>
+                  
+                  <div className="flex flex-wrap gap-1 mb-4">
+                    {selected.strategy.map((s, i) => (
+                      <span key={i} className={`px-2 py-0.5 text-[10px] rounded ${s.includes('🎯') ? 'bg-[#06b6d4]/30 text-[#06b6d4]' : 'bg-[#f59e0b]/20 text-[#f59e0b]'}`}>{s}</span>
+                    ))}
+                  </div>
+                  
+                  <button onClick={() => addToWatchlist(selected.symbol)} className="w-full py-2 bg-[#06b6d4]/20 hover:bg-[#06b6d4]/30 text-[#06b6d4] text-[11px] font-medium rounded">
+                    + Add to Watchlist
+                  </button>
+                </>
+              ) : (
+                <div className="text-center py-12 text-[#64748b] text-[12px]">Click a row or search a symbol</div>
+              )}
             </div>
           </Panel>
 
-          {/* NOTES */}
-          <Panel title="Notes" className="h-[100px] shrink-0" preMarket={preMarket}>
-            <textarea value={notes} onChange={e => setNotes(e.target.value)} placeholder="Trade ideas..." className="w-full h-full bg-[#0a0f14] resize-none p-2 text-[10px] text-[#e2e8f0] placeholder:text-[#64748b]/50 border-none" />
+          {/* JOURNAL */}
+          <Panel title={`Journal — ${getTodayDate()}`} className="flex-1" headerRight={
+            lastSaved && <span className="text-[9px] text-[#64748b]">Saved {lastSaved}</span>
+          }>
+            <div className="h-full overflow-auto">
+              <JournalSection 
+                title="Pre-Market Plan" 
+                icon="📋" 
+                content={journalSections.plan} 
+                onChange={val => setJournalSections(p => ({ ...p, plan: val }))}
+                expanded={expandedSections.plan}
+                onToggle={() => setExpandedSections(p => ({ ...p, plan: !p.plan }))}
+              />
+              <JournalSection 
+                title="Trade Ideas" 
+                icon="💡" 
+                content={journalSections.ideas} 
+                onChange={val => setJournalSections(p => ({ ...p, ideas: val }))}
+                expanded={expandedSections.ideas}
+                onToggle={() => setExpandedSections(p => ({ ...p, ideas: !p.ideas }))}
+              />
+              <JournalSection 
+                title="Lessons Learned" 
+                icon="📝" 
+                content={journalSections.lessons} 
+                onChange={val => setJournalSections(p => ({ ...p, lessons: val }))}
+                expanded={expandedSections.lessons}
+                onToggle={() => setExpandedSections(p => ({ ...p, lessons: !p.lessons }))}
+              />
+            </div>
           </Panel>
-        </section>
+        </div>
       </main>
 
       {showShortcuts && <ShortcutsModal onClose={() => setShowShortcuts(false)} />}
-      {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} onClose={() => setContextMenu(null)} onAddWatchlist={() => addToWatchlist(contextMenu.stock.symbol)} onOpenTV={() => openTradingView(contextMenu.stock.symbol)} onCopy={() => copySymbol(contextMenu.stock.symbol)} />}
     </div>
   );
 }

@@ -726,6 +726,7 @@ function App() {
   const handleRowClick = (stock: Stock, index: number) => {
     setSelected(stock);
     setSelectedIndex(index);
+    setShowChart(true); // Load chart immediately on row click
     chartRef.current?.classList.add('chart-pulse');
     setTimeout(() => chartRef.current?.classList.remove('chart-pulse'), 300);
   };
@@ -743,9 +744,28 @@ function App() {
   const positionValue = positionSize * entry;
   const exceedsBuyingPower = positionValue > accountSize;
 
-  // Chart URL
+  // Chart state - lazy loading
+  const [chartLoaded, setChartLoaded] = useState(false);
+  const [showChart, setShowChart] = useState(false);
   const chartSymbol = selected ? `${selected.exchange}:${selected.symbol}` : 'NASDAQ:AAPL';
   const chartUrl = `https://s.tradingview.com/widgetembed/?frameElementId=tv_widget&symbol=${chartSymbol}&interval=${chartInterval}&theme=dark&style=1&timezone=America%2FNew_York&hide_top_toolbar=1&hide_legend=0&save_image=0&hide_volume=0`;
+  
+  // Lazy load chart - show after 2s delay or immediately on selection
+  useEffect(() => {
+    if (selected) {
+      setShowChart(true);
+    } else {
+      const timer = setTimeout(() => setShowChart(true), 2000);
+      return () => clearTimeout(timer);
+    }
+  }, []);
+  
+  // Reset chart loaded state when symbol/interval changes
+  useEffect(() => {
+    if (showChart) {
+      setChartLoaded(false);
+    }
+  }, [chartSymbol, chartInterval, showChart]);
 
   // Float data status
   const hasFloatData = filteredStocks.some(s => s.float > 0);
@@ -910,7 +930,31 @@ function App() {
                   ))}
                 </div>
               </div>
-              <div className="flex-1"><iframe src={chartUrl} className="w-full h-full border-0" title="TradingView Chart" /></div>
+              <div className="flex-1 relative">
+                {/* Loading skeleton */}
+                {(!showChart || !chartLoaded) && (
+                  <div className="absolute inset-0 bg-[#0a0f14] flex flex-col items-center justify-center gap-3">
+                    <div className="text-2xl font-bold text-[#06b6d4]">{selected?.symbol || 'AAPL'}</div>
+                    <div className="flex items-center gap-2 text-[11px] text-[#64748b]">
+                      <div className="w-4 h-4 border-2 border-[#06b6d4] border-t-transparent rounded-full animate-spin"></div>
+                      Loading chart...
+                    </div>
+                    <div className="w-32 h-1 bg-[#1e293b] rounded overflow-hidden">
+                      <div className="h-full bg-[#06b6d4] animate-pulse" style={{ width: '60%' }}></div>
+                    </div>
+                  </div>
+                )}
+                {/* Chart iframe - lazy loaded */}
+                {showChart && (
+                  <iframe 
+                    src={chartUrl} 
+                    className={`w-full h-full border-0 transition-opacity duration-300 ${chartLoaded ? 'opacity-100' : 'opacity-0'}`}
+                    title="TradingView Chart"
+                    loading="lazy"
+                    onLoad={() => setChartLoaded(true)}
+                  />
+                )}
+              </div>
             </div>
           </Panel>
 

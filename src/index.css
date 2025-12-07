@@ -1,0 +1,292 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  background-color: #0a0f14;
+  color: #e2e8f0;
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Subtle grid background */
+.grid-bg {
+  background-image: 
+    linear-gradient(rgba(30, 41, 59, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(30, 41, 59, 0.03) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0f14;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #374151;
+}
+
+/* Panel entrance animation */
+@keyframes panelEnter {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.panel-enter {
+  animation: panelEnter 0.3s ease-out;
+}
+
+/* Price flash animations */
+@keyframes flashGreen {
+  0% { background-color: rgba(16, 185, 129, 0.5); }
+  100% { background-color: transparent; }
+}
+@keyframes flashRed {
+  0% { background-color: rgba(239, 68, 68, 0.5); }
+  100% { background-color: transparent; }
+}
+.flash-green {
+  animation: flashGreen 0.6s ease-out;
+}
+.flash-red {
+  animation: flashRed 0.6s ease-out;
+}
+
+/* Alert flash animation */
+@keyframes alertFlash {
+  0%, 100% { background-color: transparent; }
+  15%, 45%, 75% { background-color: rgba(245, 158, 11, 0.5); }
+  30%, 60%, 90% { background-color: rgba(245, 158, 11, 0.15); }
+}
+.alert-flash {
+  animation: alertFlash 1.5s ease-out;
+}
+
+/* Pulsing dot */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.pulse-dot {
+  animation: pulse 1.5s infinite;
+}
+
+/* Badge pulse */
+.animate-pulse {
+  animation: pulse 1s infinite;
+}
+
+/* Row hover effect */
+.row-hover {
+  transition: all 0.15s ease;
+}
+.row-hover:hover {
+  background-color: rgba(6, 182, 212, 0.08);
+  box-shadow: inset 0 0 20px rgba(6, 182, 212, 0.05);
+}
+
+/* Selected row */
+.selected-row {
+  transform: translateY(-1px);
+  box-shadow: 
+    inset 0 0 30px rgba(6, 182, 212, 0.1),
+    0 2px 8px rgba(0, 0, 0, 0.3);
+  position: relative;
+  z-index: 1;
+}
+
+/* Chart pulse on selection */
+@keyframes chartPulse {
+  0% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.4); }
+  50% { box-shadow: 0 0 0 10px rgba(6, 182, 212, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0); }
+}
+.chart-pulse {
+  animation: chartPulse 0.3s ease-out;
+}
+
+/* Number animation */
+@keyframes numberPop {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+.number-animate {
+  transition: color 0.2s ease;
+}
+
+/* Input styling */
+input, textarea {
+  font-family: inherit;
+}
+input:focus, textarea:focus {
+  outline: none;
+}
+
+/* Checkbox styling */
+input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: #06b6d4;
+}
+
+/* Range slider */
+input[type="range"] {
+  cursor: pointer;
+  height: 4px;
+  -webkit-appearance: none;
+  background: #1e293b;
+  border-radius: 2px;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  background: #06b6d4;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+/* Kbd styling */
+kbd {
+  font-family: inherit;
+  font-size: 11px;
+}
+
+/* Tooltip on hover (optional - can add later) */
+.row-tooltip {
+  position: absolute;
+  background: #1e293b;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  padding: 8px;
+  z-index: 100;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+/* Smooth transitions */
+button {
+  transition: all 0.15s ease;
+}
+
+/* Pre-market purple glow */
+.premarket-glow {
+  box-shadow: 0 0 20px rgba(139, 92, 246, 0.2);
+}
+
+/* Responsive adjustments */
+@media (max-width: 1400px) {
+  body {
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 1200px) {
+  body {
+    font-size: 10px;
+  }
+}
+
+/* Mobile */
+@media (max-width: 768px) {
+  main {
+    flex-direction: column !important;
+  }
+  main > * {
+    width: 100% !important;
+    min-height: 200px;
+  }
+}
+
+/* Custom scrollbar for tables */
+.overflow-auto {
+  scrollbar-width: thin;
+  scrollbar-color: #1e293b #0a0f14;
+}
+
+/* Fade in rows */
+@keyframes fadeInRow {
+  from {
+    opacity: 0;
+    transform: translateX(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+tbody tr {
+  animation: fadeInRow 0.2s ease-out;
+}
+
+/* Skeleton loading */
+@keyframes shimmer {
+  0% { background-position: -200px 0; }
+  100% { background-position: 200px 0; }
+}
+
+.skeleton {
+  background: linear-gradient(90deg, #1e293b 0%, #374151 50%, #1e293b 100%);
+  background-size: 400px 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* Focus visible for accessibility */
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid #06b6d4;
+  outline-offset: 2px;
+}
+
+/* Smooth number transitions */
+.smooth-number {
+  transition: all 0.3s ease;
+  display: inline-block;
+}
+
+/* Glow effects */
+.glow-cyan {
+  box-shadow: 0 0 10px rgba(6, 182, 212, 0.5);
+}
+
+.glow-green {
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
+}
+
+.glow-red {
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+}
+
+.glow-amber {
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.5);
+}
